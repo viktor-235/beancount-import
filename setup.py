@@ -151,7 +151,8 @@ setuptools.setup(
     description='Semi-automatic importing of external data into beancount.',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    url='https://github.com/jbms/beancount-import',
+    # Fork of https://github.com/jbms/beancount-import, see FORK.md.
+    url='https://github.com/viktor-235/beancount-import',
     author='Jeremy Maitin-Shepard',
     author_email="jeremy@jeremyms.com",
     license='GPLv2',
@@ -162,7 +163,7 @@ setuptools.setup(
     package_data={
         'beancount_import': ['frontend_dist/*'],
     },
-    python_requires='>=3.9',
+    python_requires='>=3.10',
     setup_requires=['setuptools_scm>=5.0.2'],
     install_requires=[
         'beancount>=2.3.5',
