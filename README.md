@@ -1,3 +1,11 @@
+> [!NOTE]
+> **This is a fork of [jbms/beancount-import](https://github.com/jbms/beancount-import).**
+> It adds payee history hints and optional on-demand AI categorization (JEV via
+> OpenRouter) to the review UI. See **[FORK.md](FORK.md)** for features,
+> screenshots, setup and privacy notes, or the
+> [full diff against upstream](https://github.com/jbms/beancount-import/compare/master...viktor-235:beancount-import:category-hints).
+> The rest of this README is the upstream documentation.
+
 Beancount-import is a tool for semi-automatically importing financial data from
 external data sources into the [Beancount](https://beancount.github.io/)
 bookkeeping system, as well as merging and reconciling imported transactions with

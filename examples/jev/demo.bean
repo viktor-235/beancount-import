@@ -1,0 +1,41 @@
+option "title" "Synthetic JEV review demo"
+2000-01-01 open Assets:Bank USD
+2000-01-01 open Assets:Savings USD
+2000-01-01 open Expenses:Coffee USD
+  note: "Coffee and snacks."
+2000-01-01 open Expenses:Groceries USD
+2000-01-01 open Expenses:Unused USD
+2000-01-01 open Expenses:FIXME USD
+2000-01-01 open Income:Salary USD
+
+2025-01-01 * "Coffee+Bar" "Coffee and cake"
+  Assets:Bank -8 USD
+  Expenses:Coffee 8 USD
+
+2025-01-02 * "COFFEE+bar" "Coffee beans"
+  Assets:Bank -12 USD
+  Expenses:Groceries 12 USD
+
+2025-01-03 * "Coffee Bar" "Different exact payee"
+  Assets:Bank -15 USD
+  Expenses:Groceries 15 USD
+
+2026-01-01 * "Coffee+Bar" "Single purchase" #synthetic ^demo
+  demo_id: "one"
+  Assets:Bank -6 USD
+    source_desc: "COFFEE+BAR DEMO"
+  Expenses:FIXME 6 USD
+
+2026-02-01 * "Coffee+Bar" "Split purchase"
+  demo_id: "split"
+  Assets:Bank -12 USD
+  Expenses:FIXME 5 USD
+  Expenses:FIXME 7 USD
+
+2026-03-01 * "Transfer" "Bank side"
+  Assets:Bank -100 USD
+  Expenses:FIXME 100 USD
+
+2026-03-01 * "Transfer" "Savings side"
+  Assets:Savings 100 USD
+  Expenses:FIXME -100 USD
