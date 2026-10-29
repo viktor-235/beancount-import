@@ -411,6 +411,9 @@ class AppComponent
                 isOpen={this.state.settingsOpen}
                 onToggle={this.handleToggleSettings}
                 onSettingsChange={this.handleSettingsChange}
+                jevDefaultInstructions={
+                  this.state.jev_default_instructions || ""
+                }
               />
             </StatusBar>
           </AppRootElement>

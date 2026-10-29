@@ -186,3 +186,28 @@ a {
   opacity: 0.5;
   cursor: default;
 }
+
+/* Local history and manual JEV hints inherit the review theme. */
+.hints-toolbar-wrapper { flex-wrap: wrap; }
+.hints-toolbar-wrapper .action-button__group { max-width: 100%; }
+.history-hints { margin: 6px; font-family: var(--font-fam-sans); line-height: 1.2; }
+.history-hints section { border: 1px solid var(--color-main-accent); margin-bottom: 6px; }
+.hints-heading { display: flex; align-items: center; gap: 6px; min-height: 24px; box-sizing: border-box; background: var(--color-hover-bg); padding: 0 6px; border-bottom: 1px solid var(--color-main-accent); font-weight: bold; }
+.hints-history-heading { padding: 3px 3px 3px 6px; }
+.hints-heading-title { flex-shrink: 0; }
+.hints-controls { padding: 4px 6px; display: flex; flex-direction: column; gap: 4px; }
+.hints-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.hints-search, .hints-controls select { flex: 1; min-width: 80px; max-width: 100%; box-sizing: border-box; padding: 2px 4px; font: inherit; line-height: 1.2; background: var(--color-main-bg); color: var(--color-main-text); border: 1px solid var(--color-main-accent); }
+.hints-search { width: 0; padding: 1px 4px; font-weight: normal; }
+.hints-rows { max-height: 320px; overflow: auto; }
+.hints-category { display: flex; width: 100%; justify-content: space-between; gap: 6px; padding: 3px 6px; border: 0; border-bottom: 1px solid var(--color-main-accent); background: var(--color-hover-bg); color: inherit; font: inherit; line-height: 1.2; text-align: left; cursor: pointer; }
+.hints-history-row > .hints-category { border-top: 1px solid var(--color-main-accent); border-bottom: 0; }
+.hints-category:hover:not(:disabled), .hints-category:focus-visible { background: var(--color-select-bg); color: var(--color-select-text); }
+.hints-category:disabled { cursor: default; opacity: 0.6; }
+.hints-category.hints-valid { font-weight: bold; }
+.hints-category span:first-child, .hints-narration span:first-child { overflow-wrap: anywhere; }
+.hints-narration { display: flex; width: 100%; justify-content: space-between; gap: 6px; padding: 2px 8px; border: 0; background: var(--color-main-bg); color: inherit; font: inherit; line-height: 1.2; text-align: left; cursor: pointer; }
+.hints-narration:hover, .hints-narration:focus-visible { background: var(--color-select-bg); color: var(--color-select-text); }
+.hints-note { padding: 3px 6px; }
+.hints-controls .hints-note { padding: 0; }
+.hints-json { margin: 0; padding: 5px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

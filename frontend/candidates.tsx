@@ -11,6 +11,7 @@ import {
   executeServerCommand,
   BeancountEntry
 } from "./server_connection";
+import { HistoryHintsComponent } from "./history_hints";
 import { AccountInputComponent } from "./account_input";
 import { UsedTransactionsComponent } from "./used_transactions";
 import { CandidateComponent } from "./candidate";
@@ -93,6 +94,7 @@ export type ActiveInputState = {
 };
 
 interface CandidatesComponentState {
+  hintsToolbar: HTMLDivElement | null;
   disabledUsedTransactions: Set<number>;
   hoverCandidateIndex?: number;
   candidates?: Candidates;
@@ -106,8 +108,13 @@ export class CandidatesComponent extends React.PureComponent<
   CandidatesComponentState
 > {
   state: CandidatesComponentState = {
+    hintsToolbar: null,
     disabledUsedTransactions: new Set(),
     selectedCandidateIndex: 0
+  };
+  private hintsRef = React.createRef<HistoryHintsComponent>();
+  private setHintsToolbar = (element: HTMLDivElement | null) => {
+    if (element !== this.state.hintsToolbar) this.setState({ hintsToolbar: element });
   };
   private filteredCandidateIndices: number[] = [];
   private globalToFilteredIndex = new Map<number, number>();
@@ -343,7 +350,7 @@ export class CandidatesComponent extends React.PureComponent<
 
     return (
       <>
-        <div className="action-button-wrapper">
+        <div className="action-button-wrapper hints-toolbar-wrapper">
           <div className="action-button__group">
             <button
               disabled={pendingIndex == 0}
@@ -471,6 +478,7 @@ export class CandidatesComponent extends React.PureComponent<
               Retrain
             </button>
           </div>
+          <div className="action-button__group" ref={this.setHintsToolbar} />
         </div>
         <UsedTransactionsComponent
           usedTransactions={this.props.candidates.used_transactions}
@@ -517,6 +525,15 @@ export class CandidatesComponent extends React.PureComponent<
               />
             );
           })}
+          {selectedCandidate && <HistoryHintsComponent
+            key={`${this.props.candidatesGeneration}:${this.state.selectedCandidateIndex}`}
+            ref={this.hintsRef}
+            candidate={selectedCandidate}
+            candidateIndex={this.state.selectedCandidateIndex}
+            generation={this.props.candidatesGeneration}
+            configured={!!this.props.serverConnection.state.jev_configured}
+            toolbar={this.state.hintsToolbar}
+          />}
         </CandidateListElement>
         {accountInputComponent}
       </>
@@ -560,6 +577,15 @@ export class CandidatesComponent extends React.PureComponent<
       event.target instanceof HTMLTextAreaElement ||
       event.target instanceof HTMLButtonElement
     ) {
+      return;
+    }
+    if (event.key === "c") {
+      const target = event.target;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
+          (target instanceof HTMLElement && (target.isContentEditable ||
+           target.closest(".CodeMirror, select, [role=textbox]")))) return;
+      event.preventDefault();
+      if (this.hintsRef.current) this.hintsRef.current.classify();
       return;
     }
     switch (event.key) {

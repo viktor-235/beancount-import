@@ -2,11 +2,13 @@
 
 from typing import Tuple, Optional, List, Dict, Any
 import argparse
+import asyncio
 import binascii
 import datetime
 import time
 import io
 import collections
+import functools
 import sys
 import logging
 import traceback
@@ -32,6 +34,7 @@ import watchdog.events
 import watchdog.observers
 
 from . import reconcile
+from . import history_hints, jev
 
 from . import training
 from . import matching
@@ -152,7 +155,9 @@ def json_encode_candidates(candidates: reconcile.Candidates):
 def json_encode_candidate(obj: reconcile.Candidate):
     change_sets, _, _ = obj.staged_changes_with_unique_account_names.get_diff()
     _, _, new_entries = obj.staged_changes.get_diff()
+    snapshot = history_hints.candidate_snapshot(obj)
     return dict(
+        hints=snapshot[1] if snapshot else None,
         change_sets=change_sets,
         used_transaction_ids=obj.used_transaction_ids,
         substituted_accounts=obj.substituted_accounts or [],
@@ -252,11 +257,71 @@ class GetDataHandler(tornado.web.RequestHandler):
             return self.finish('Error writing data')
 
 
+def get_hint_candidate(application, msg):
+    candidates = application.next_candidates
+    index = msg.get('candidate_index')
+    if (candidates is None or type(index) is not int or
+            msg.get('generation') != application.current_state.get('candidates_generation') or
+            not 0 <= index < len(candidates.candidates)):
+        raise jev.JevError("The candidate changed. Select it again.", 409)
+    candidate = candidates.candidates[index]
+    snapshot = history_hints.candidate_snapshot(candidate)
+    if snapshot is None:
+        raise jev.JevError("Select a transaction candidate.", 422)
+    if msg.get('token') != snapshot[1]['token']:
+        raise jev.JevError("The transaction changed. Request hints again.", 409)
+    return candidate
+
+
+class HistoryHintsHandler(tornado.web.RequestHandler):
+    async def post(self, operation):
+        self.set_header('Content-Type', 'application/json')
+        self.set_header('Cache-Control', 'no-store')
+        try:
+            try:
+                msg = json.loads(self.request.body)
+            except (ValueError, UnicodeError):
+                raise jev.JevError("Invalid request.", 400)
+            if not isinstance(msg, dict):
+                raise jev.JevError("Invalid request.", 400)
+            candidate = get_hint_candidate(self.application, msg)
+            editor = self.application.reconciler.loaded_future.result().editor
+            if operation == 'history':
+                query = msg.get('query', '')
+                if not isinstance(query, str):
+                    raise jev.JevError("Invalid history query.", 400)
+                result = history_hints.summarize(
+                    history_hints.history_entries(editor, candidate), query)
+            else:
+                context = history_hints.build_context(
+                    editor, candidate, msg.get('group_number'), msg.get('account_filters'))
+                instructions = msg.get('instructions')
+                if operation == 'request':
+                    result = {'request': jev.build_request(context, instructions=instructions)}
+                else:
+                    jev.check_not_skipped(msg.get('skip_patterns'), context['transaction'])
+                    # One explicit request, off the Tornado event loop. No queue,
+                    # prefetching, retries or persisted classification results.
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        None, functools.partial(jev.classify, context, instructions=instructions))
+                    get_hint_candidate(self.application, msg)
+            self.write(json.dumps({'token': msg['token'], **result}))
+        except jev.JevError as exc:
+            self.set_status(exc.status)
+            self.write(json.dumps({'error': str(exc)}))
+
+
 class ChangeCandidateHandler(tornado.web.RequestHandler):
     def post(self):
         msg = json.loads(self.request.body)
-        self.application.handle_change_candidate(msg)
         self.set_header('Content-Type', 'application/json')
+        try:
+            self.application.handle_change_candidate(msg)
+        except jev.JevError as exc:
+            # JSON, so the hints panel can show the message.
+            self.set_status(exc.status)
+            self.write(json.dumps({'error': str(exc)}))
+            return
         self.write(json.dumps(None).encode())
 
 
@@ -438,6 +503,7 @@ class Application(tornado.web.Application):
              secret_key, GetDataHandler),
             (r'/%s/websocket' % secret_key, WebSocketHandler),
             (r'/%s/get_file' % secret_key, GetFileHandler),
+            (r'/%s/hints/(history|request|classify)' % secret_key, HistoryHintsHandler),
             (r'/%s/change_candidate' % secret_key, ChangeCandidateHandler),
             (r'/%s/select_candidate' % secret_key, SelectCandidateHandler),
             (r'/%s/skip' % secret_key, SkipHandler),
@@ -500,7 +566,8 @@ class Application(tornado.web.Application):
             invalid=None,
             uncleared=None,
             main_journal_path=os.path.realpath(self.reconciler.journal_path),
-            candidates=None)
+            candidates=None, jev_configured=jev.configured(),
+            jev_default_instructions=jev.DEFAULT_INSTRUCTIONS)
         self.ioloop.add_future(self.reconciler.loaded_future,
                                self._handle_reconciler_loaded)
 
@@ -599,6 +666,9 @@ class Application(tornado.web.Application):
         self.set_state(message=message)
 
     def handle_change_candidate(self, msg):
+        from_hints = 'hint_token' in msg
+        if from_hints:
+            get_hint_candidate(self, {**msg, 'token': msg['hint_token']})
         try:
             if (self.next_candidates is not None and
                     self.current_state['candidates_generation'] ==
@@ -608,6 +678,8 @@ class Application(tornado.web.Application):
                 self.set_state_force(candidates=self.next_candidates)
         except:
             traceback.print_exc()
+            if from_hints:
+                raise jev.JevError("Could not apply the change.", 500)
 
     def handle_select_candidate(self, msg):
         try:

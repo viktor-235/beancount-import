@@ -102,7 +102,15 @@ export interface AssociatedEntryData {
   path: string;
 }
 
+export interface CandidateHints {
+  token: string;
+  payee: string;
+  transaction: string;
+  groups: { number: number; posting_indices: number[]; postings: string[] }[];
+}
+
 export interface Candidate {
+  hints?: CandidateHints | null;
   used_transaction_ids: number[];
   substituted_accounts: SubstitutedAccount[];
   change_sets: FileChangeSet[];
@@ -144,6 +152,8 @@ export interface PendingEntry {
 export type GenerationAndCount = [number, number];
 
 export interface ServerState {
+  jev_configured: boolean;
+  jev_default_instructions?: string;
   opened: boolean;
   closed: boolean;
   message: string;

@@ -274,7 +274,7 @@ class JournalEditor(object):
         (final_entries, self.errors, self.options_map, pre_booking_entries,
          post_booking_entries,
          self.journal_load_time) = load_file(journal_path)
-        del final_entries
+        self._history_entries = final_entries
         self.entries = get_partially_booked_entries(pre_booking_entries,
                                                     post_booking_entries)
         self.cached_lines = {}  # type: Dict[str, List[str]]
@@ -493,6 +493,7 @@ class JournalEditor(object):
             self, staged_changes: 'StagedChanges') -> ApplyStagedChangesResult:
         change_sets, old_entries, new_entries = staged_changes.get_diff()
         self.apply_change_sets(change_sets)
+        self._history_entries = None
         old_entries_set = set(map(id, old_entries))
         self.entries = [
             e for e in self.entries
@@ -535,6 +536,13 @@ class JournalEditor(object):
             ],
             new_ignored_entries=ignored_booked_new_entries,
         )
+
+    @property
+    def history_entries(self):
+        # Like Fava, use the plugin-processed ledger, not just editable entries.
+        if self._history_entries is None:
+            self._history_entries = load_file(self.journal_path)[0]
+        return self._history_entries
 
     def stage_changes(self) -> 'StagedChanges':
         return StagedChanges(self)
