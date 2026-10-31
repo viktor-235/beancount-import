@@ -17,6 +17,7 @@ import beancount.parser.printer
 
 from . import training
 from . import matching
+from . import import_rules
 from . import journal_editor
 from .source import ImportResult, load_source, SourceResults, Source, LogFunction, AssociatedData, InvalidSourceReference, invalid_source_reference_sort_key
 from .posting_date import get_posting_date
@@ -46,6 +47,18 @@ AcceptCandidateResult = NamedTuple('AcceptCandidateResult', [
 
 def is_account_unknown(posting: Posting) -> bool:
     return is_unknown_account(posting.account)
+
+
+# Posting metadata set by the importer's rule-based categorizer.
+CATEGORIZER_KEY = 'categorizer'
+RULES_CATEGORIZER = 'rules'
+
+
+def is_rules_categorized(transaction: Transaction) -> bool:
+    """Fully categorized by import rules: no unknown accounts left."""
+    return (not any(is_account_unknown(p) for p in transaction.postings) and
+            any(p.meta and p.meta.get(CATEGORIZER_KEY) == RULES_CATEGORIZER
+                for p in transaction.postings))
 
 
 def include_import_transaction(transaction: Transaction,
@@ -394,6 +407,7 @@ class LoadedReconciler(object):
         )  # type: Dict[Tuple[datetime.date, str, str], Decimal]
         self.price_values = set()  # type: Set[Tuple[datetime.date, str, Amount]]
         all_source_results = self._prepare_sources()
+        self._load_import_rules()
         self._preprocess_entries()
         self._match_sources(all_source_results)
         all_skip_accounts = set()
@@ -438,6 +452,18 @@ class LoadedReconciler(object):
             load_source(spec, log_status=self.reconciler.log_status)
             for spec in self.reconciler.options['data_sources']
         ]
+
+    def _load_import_rules(self):
+        # Loaded on every journal reload, so edits apply without a restart.
+        self.import_rules = []  # type: List[import_rules.Rule]
+        path = self.reconciler.options.get('import_rules')
+        if path is None:
+            return
+        try:
+            self.import_rules = import_rules.load_rules(path)
+        except Exception as e:
+            self.errors.append(
+                ('error', 'Import rules disabled: %s' % e, {'filename': path}))
 
     def _preprocess_entries(self):
         posting_db = self.posting_db
@@ -675,6 +701,10 @@ class LoadedReconciler(object):
                         continue
                     self.balance_entries[key] = entry.amount.number
                 else:
+                    if isinstance(entry, Transaction):
+                        entry, warnings = import_rules.apply_rules(
+                            self.import_rules, entry)
+                        self.errors.extend(('warning', w, {}) for w in warnings)
                     pending_transaction_ids.add(id(entry))
                     posting_db.add_transaction(entry)
                     only_balance_or_price = False
@@ -886,6 +916,37 @@ class LoadedReconciler(object):
                 break
             skip_ids[pending.id] += 1
         return skip_ids
+
+    def _get_rules_transaction(self, pending: PendingEntry) -> Optional[Transaction]:
+        """The transaction of `pending` if it can be accepted without review.
+
+        Pending entries that match other transactions are left for review, since
+        accepting them as is could duplicate an existing transaction.
+        """
+        if pending.source is None or len(pending.entries) != 1:
+            return None
+        transaction = pending.entries[0]
+        if not isinstance(transaction, Transaction) or not is_rules_categorized(transaction):
+            return None
+        if matching.get_extended_transactions(transaction, posting_db=self.posting_db):
+            return None
+        return transaction
+
+    def count_rules_pending(self) -> int:
+        return sum(self._get_rules_transaction(p) is not None for p in self.pending_data)
+
+    def accept_rules_candidates(self) -> List[AcceptCandidateResult]:
+        """Accepts every pending transaction fully categorized by import rules."""
+        results = []
+        for pending in list(self.pending_data):
+            # Checked again, since each accept changes the posting database.
+            transaction = self._get_rules_transaction(pending)
+            if transaction is None:
+                continue
+            candidate = self._make_candidate_with_substitutions(
+                transaction, [transaction], predicted_accounts=[])
+            results.append(self.accept_candidate(candidate))
+        return results
 
     def accept_candidate(self, candidate: Candidate, ignore=False) -> AcceptCandidateResult:
         ignored_path = self.editor.ignored_path

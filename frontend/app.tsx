@@ -338,6 +338,7 @@ class AppComponent
                         numPending={
                           this.state.pending == null ? 0 : this.state.pending[1]
                         }
+                        rulesPending={this.state.rules_pending || 0}
                         candidatesGeneration={this.state.candidates_generation!}
                         candidates={this.state.candidates!}
                         highlightPending={this.highlightPending}

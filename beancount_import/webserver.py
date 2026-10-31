@@ -344,6 +344,13 @@ class SkipHandler(tornado.web.RequestHandler):
         self.write(json.dumps(None).encode())
 
 
+class AcceptRulesHandler(tornado.web.RequestHandler):
+    def post(self):
+        self.application.handle_accept_rules()
+        self.set_header('Content-Type', 'application/json')
+        self.write(json.dumps(None).encode())
+
+
 class RetrainHandler(tornado.web.RequestHandler):
     def post(self):
         self.application.retrain()
@@ -507,6 +514,7 @@ class Application(tornado.web.Application):
             (r'/%s/change_candidate' % secret_key, ChangeCandidateHandler),
             (r'/%s/select_candidate' % secret_key, SelectCandidateHandler),
             (r'/%s/skip' % secret_key, SkipHandler),
+            (r'/%s/accept_rules' % secret_key, AcceptRulesHandler),
             (r'/%s/retrain' % secret_key, RetrainHandler),
         ], **kwargs)
         self.socket_clients = set()
@@ -566,7 +574,7 @@ class Application(tornado.web.Application):
             invalid=None,
             uncleared=None,
             main_journal_path=os.path.realpath(self.reconciler.journal_path),
-            candidates=None, jev_configured=jev.configured(),
+            candidates=None, rules_pending=None, jev_configured=jev.configured(),
             jev_default_instructions=jev.DEFAULT_INSTRUCTIONS)
         self.ioloop.add_future(self.reconciler.loaded_future,
                                self._handle_reconciler_loaded)
@@ -622,6 +630,7 @@ class Application(tornado.web.Application):
                 pending=(generation, len(loaded_reconciler.pending_data)),
                 uncleared=(generation,
                            len(loaded_reconciler.uncleared_postings)),
+                rules_pending=loaded_reconciler.count_rules_pending(),
             )
 
         accounts = sorted(loaded_reconciler.editor.accounts.keys())
@@ -701,6 +710,16 @@ class Application(tornado.web.Application):
             traceback.print_exc()
             print('got error')
             pdb.post_mortem()
+
+    def handle_accept_rules(self):
+        if not self.reconciler.loaded_future.done():
+            return
+        results = self.reconciler.loaded_future.result().accept_rules_candidates()
+        if results:
+            self._notify_modified_files(list({
+                filename for result in results for filename in result.modified_filenames}))
+            self.get_next_candidates(new_pending=True)
+        self.log_status('Accepted %d transactions categorized by rules' % len(results))
 
     def handle_skip(self, msg):
         pending_generation = int(msg['generation'])
@@ -795,6 +814,12 @@ def parse_arguments(argv, **kwargs):
         default=D('0.01'),
         help=
         'Maximum amount by which the weights of two matching entries may differ.'
+    )
+    argparser.add_argument(
+        '--import_rules',
+        type=str,
+        help=
+        'YAML file with rules applied to imported transactions.  Requires fava.'
     )
     argparser.add_argument(
         '--classifier_cache',

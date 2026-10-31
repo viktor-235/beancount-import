@@ -80,6 +80,7 @@ interface CandidatesComponentProps {
   highlightPending: (index: number) => void;
   pendingIndex: number;
   numPending: number;
+  rulesPending: number;
   accounts: string[];
   associatedDataViewController: AssociatedDataViewController;
   candidateSelectionState: CandidateSelectionState;
@@ -101,6 +102,7 @@ interface CandidatesComponentState {
   candidatesGeneration?: number;
   inputState?: ActiveInputState;
   selectedCandidateIndex: number;
+  acceptingRules?: boolean;
 }
 
 export class CandidatesComponent extends React.PureComponent<
@@ -478,6 +480,16 @@ export class CandidatesComponent extends React.PureComponent<
               Retrain
             </button>
           </div>
+          <div className="action-button__group">
+            <button
+              disabled={this.props.rulesPending === 0 || this.state.acceptingRules}
+              onClick={this.handleAcceptRules}
+              title="Confirm every pending transaction fully categorized by import rules (categorizer: rules) that matches no other transaction"
+              className="action-button"
+            >
+              Accept rules ({this.props.rulesPending})
+            </button>
+          </div>
           <div className="action-button__group" ref={this.setHintsToolbar} />
         </div>
         <UsedTransactionsComponent
@@ -794,5 +806,10 @@ export class CandidatesComponent extends React.PureComponent<
   };
   private handleConfirm = () => {
     this.acceptCandidate(this.state.selectedCandidateIndex);
+  };
+  private handleAcceptRules = () => {
+    this.setState({ acceptingRules: true });
+    const done = () => this.setState({ acceptingRules: false });
+    executeServerCommand("accept_rules", null).then(done, done);
   };
 }

@@ -58,6 +58,60 @@ Full diff against upstream:
 - An answer is discarded when the candidate changes, so a late reply never
   lands on the wrong transaction.
 
+### Import rules
+
+`--import_rules PATH` (or `import_rules=` in a launcher) applies rules from a
+YAML file to every imported transaction, from any data source. A rule has a
+[Fava filter](https://fava.pythonanywhere.com/example-beancount-file/help/filters)
+and actions:
+
+```yaml
+x-auto-confirm: &auto-confirm
+  addPostingMeta:
+    categorizer: rules
+
+rules:
+  - <<: *auto-confirm
+    filter: 'payee:"^Spotify AB$"'
+    setAccount: Expenses:Entertainment:Other
+    setNarration: Spotify Subscription
+    addTags: "#recurring"
+    addMeta: {subscriptionName: Spotify}
+```
+
+| Action | Effect |
+|---|---|
+| `setAccount` | Replaces every unknown account (`Expenses:FIXME` and `Expenses:FIXME:*`) |
+| `addPostingMeta` | Metadata for that posting; needs `setAccount` |
+| `setPayee`, `setNarration` | Replace the payee or narration |
+| `addTags`, `addMeta` | Add tags (`"#a #b"`) or transaction metadata |
+
+- Matching rules apply in order. Tags and metadata accumulate; for the other
+  actions the first rule wins, and a different value from a later rule is
+  reported as a warning.
+- Fava filters ignore case. A quote inside a filter string needs the other
+  quote style: `payee:'^IP "OSPANOVA"$'`.
+- Top-level keys starting with `x-` only hold YAML anchors. `<<` replaces
+  whole keys, so a rule with its own `addPostingMeta` drops the anchor's one.
+- Rules run after the source has stored the original narration in
+  `source_desc`, so `setNarration` does not create duplicates on re-import.
+- Accounts are not checked: a typo in `setAccount` opens a new account on
+  Confirm.
+- The file is reloaded with the journal. On an error, all rules are disabled
+  and the error is listed in the UI.
+- Requires fava: `pip install "beancount-import[rules] @ git+https://github.com/viktor-235/beancount-import@category-hints"`.
+
+### Accept rules
+
+- **Accept rules (N)** in the candidate toolbar confirms every pending
+  transaction that the importer fully categorized by its rules: no unknown
+  account is left and some posting has `categorizer: "rules"` metadata.
+  N is the number of transactions the button will confirm.
+- A transaction that matches another one (a possible duplicate or a transfer
+  leg) is left for manual review.
+- The transactions are written exactly like a manual Confirm, without AI
+  requests.
+
 ### Settings
 
 ![JEV settings](docs/images/settings.png)
@@ -119,9 +173,10 @@ Then open http://127.0.0.1:8106/. See [examples/jev/README.md](examples/jev/READ
 | Backend | New `beancount_import/history_hints.py` (candidate snapshot, history search) and `beancount_import/jev.py` (request building, OpenRouter client) |
 | Backend | `webserver.py`: `/hints/{history,request,classify}` endpoints, a stale-candidate guard on `change_candidate`, and JEV state in the initial state |
 | Backend | `journal_editor.py`: keeps the plugin-processed entries for history |
+| Backend | New `beancount_import/import_rules.py`; `reconcile.py` applies the rules to pending transactions and adds Accept rules; `webserver.py` adds `--import_rules`, the `/accept_rules` endpoint and the `rules_pending` count in the state |
 | Frontend | New `history_hints.tsx` and `jev_settings.ts`. Changes to `candidates.tsx` (panel, `c` shortcut), `settings.tsx` (JEV settings) and `styles.css` |
-| Tests | `jev_test.py`, `history_hints_test.py` and `frontend/history_hints.test.cjs` (`npm test`) |
-| Packaging | `python_requires >= 3.10`. CI also runs `npm test`. PyPI publishing is removed (the fork is not published to PyPI) |
+| Tests | `jev_test.py`, `history_hints_test.py`, `accept_rules_test.py`, `import_rules_test.py` and `frontend/history_hints.test.cjs` (`npm test`) |
+| Packaging | `python_requires >= 3.10`. Optional `rules` extra with fava. CI also runs `npm test`. PyPI publishing is removed (the fork is not published to PyPI) |
 
 The source adapters, matching rules and the built-in classifier are unchanged.
 

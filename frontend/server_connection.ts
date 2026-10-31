@@ -166,6 +166,7 @@ export interface ServerState {
   candidates_generation: number;
   action_sounds: [string, string][];
   pending: GenerationAndCount | null;
+  rules_pending: number | null;
   errors: GenerationAndCount | null;
   uncleared: GenerationAndCount | null;
   invalid: GenerationAndCount | null;

@@ -181,6 +181,9 @@ setuptools.setup(
         'typing_extensions',
         'cachetools',
     ],
+    extras_require={
+        'rules': ['fava'],
+    },
     test_requirements=[
         'pytest',
         'coverage',
