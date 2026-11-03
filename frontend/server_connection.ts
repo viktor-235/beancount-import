@@ -165,7 +165,34 @@ export interface JevRun {
   running: boolean;
 }
 
+/** A journal transaction of the Transactions tab. */
+export interface TransactionItem {
+  date: string;
+  formatted: string;
+  filename: string;
+  lineno: number | null;
+}
+
+export interface TransactionsPage {
+  count: number;
+  categorizers: string[];
+  items: TransactionItem[];
+}
+
+/** The journal transaction open in Candidates for editing. */
+export interface ReviewState {
+  filename: string;
+  lineno: number | null;
+  // Row of the Transactions list (filter at opening) and its length; offset
+  // null if the transaction is not in the list.
+  offset: number | null;
+  count: number;
+}
+
 export interface ServerState {
+  // Changes whenever the journal entries may have changed (load, Confirm,
+  // accepts); null while the journal is loading.
+  journal_generation: number | null;
   // OPENROUTER_API_KEY set and a valid settings file.
   jev_enabled: boolean;
   jev_settings_error?: string | null;
@@ -189,6 +216,7 @@ export interface ServerState {
   errors: GenerationAndCount | null;
   uncleared: GenerationAndCount | null;
   invalid: GenerationAndCount | null;
+  review: ReviewState | null;
 }
 
 interface SkipMessage {
@@ -220,7 +248,14 @@ interface ChangeCandidateMessage {
 
 interface SelectCandidateMessage {
   type: "select_candidate";
-  value: { index: number; generation: number };
+  value: {
+    index: number;
+    generation: number;
+    ignore?: boolean;
+    // Transactions filter arguments while editing a journal transaction:
+    // the server opens the next row after Confirm.
+    review_filter?: Record<string, string>;
+  };
 }
 
 interface GetFileContentsMessage {
@@ -276,15 +311,51 @@ export const secretKey =
 
 export type ServerDataType = "pending" | "uncleared" | "invalid" | "errors";
 
-export function fetchServerData(
-  dataType: ServerDataType,
+export class FetchError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public serverMessage?: string
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, FetchError.prototype);
+  }
+}
+
+export function fetchJson(url: string): Promise<any> {
+  return fetch(url).then(response => {
+    if (response.ok) {
+      return response.json();
+    }
+    return response.text().then(body => {
+      let message: string | undefined;
+      try {
+        message = JSON.parse(body).error;
+      } catch (e) {
+        // Not a JSON body.
+      }
+      throw new FetchError(
+        `Error fetching response: ${response.status} ${response.statusText}`,
+        response.status,
+        message
+      );
+    });
+  });
+}
+
+export type ServerListFetcher<T> = (
   generation: number,
   startIndex: number,
   endIndex: number
-) {
-  return fetch(
-    `${window.location.pathname}${secretKey}/${dataType}/${generation}/${startIndex}-${endIndex}`
-  );
+) => Promise<T[]>;
+
+export function serverDataFetcher<T>(
+  dataType: ServerDataType
+): ServerListFetcher<T> {
+  return (generation, startIndex, endIndex) =>
+    fetchJson(
+      `${window.location.pathname}${secretKey}/${dataType}/${generation}/${startIndex}-${endIndex}`
+    );
 }
 
 const serverDataRetryDelay = 1000;
@@ -302,7 +373,11 @@ export class ServerListCache<T> {
     (startIndex: number, endIndex: number, generation: number) => void
   >();
 
-  constructor(private dataType: ServerDataType, private blockSize = 10) {}
+  constructor(
+    private fetcher: ServerListFetcher<T>,
+    private name: string,
+    private blockSize = 10
+  ) {}
 
   requestRange(
     generation: number,
@@ -354,17 +429,7 @@ export class ServerListCache<T> {
       }
       return true;
     };
-    fetchServerData(this.dataType, generation, startIndex, endIndex)
-      .then(response => {
-        if (response.ok) {
-          return response.json();
-        } else {
-          throw new Error(
-            `Error fetching response: ${response.status} ${response.statusText}`
-          );
-        }
-      })
-      .then(
+    this.fetcher(generation, startIndex, endIndex).then(
         value => {
           if (this.generation !== generation) {
             return;
@@ -389,7 +454,7 @@ export class ServerListCache<T> {
           }
           console.log(
             `Error retrieving ${
-              this.dataType
+              this.name
             }, ${generation}, ${startIndex}, ${endIndex}: ${error}`
           );
           setTimeout(() => {

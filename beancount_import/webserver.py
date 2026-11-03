@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional, List, Dict, Any, NamedTuple
 import argparse
 import asyncio
 import binascii
@@ -34,11 +34,18 @@ import watchdog.events
 import watchdog.observers
 
 from . import reconcile
-from . import history_hints, jev
+from . import history_hints, jev, transactions
 
 from . import training
 from . import matching
 from .source import Source, InvalidSourceReference
+
+
+class TransactionsCache(NamedTuple):
+    generation: int
+    index: transactions.Index
+    filter: transactions.Filter
+    matched: list
 
 
 def init_tornado_asyncio():
@@ -262,6 +269,44 @@ class GetDataHandler(tornado.web.RequestHandler):
             return self.finish('Error writing data')
 
 
+MAX_TRANSACTIONS_LIMIT = 200
+
+
+class TransactionsHandler(tornado.web.RequestHandler):
+    """A filtered page of journal transactions for the Transactions tab.
+
+    The client asks only while the tab is open, so nothing is computed on
+    state updates. `limit=0` returns only the count and categorizers.
+    """
+
+    def get(self):
+        self.set_header('Content-Type', 'application/json')
+        self.set_header('Cache-Control', 'no-store')
+        args = {name: self.get_query_argument(name)
+                for name in self.request.query_arguments}
+        try:
+            generation = int(args.pop('generation', ''))
+            offset = int(args.pop('offset', '0'))
+            limit = min(int(args.pop('limit', '0')), MAX_TRANSACTIONS_LIMIT)
+            flt = transactions.parse_filter(args)
+            if offset < 0 or limit < 0:
+                raise ValueError('negative offset or limit')
+        except ValueError as exc:
+            self.set_status(400)
+            return self.finish(json.dumps({'error': 'Invalid request: %s' % exc}))
+        result = self.application.get_transactions(generation, flt)
+        if result is None:
+            self.set_status(404)
+            return self.finish(json.dumps({'error': 'Stale generation.'}))
+        index, matched = result
+        self.write(json.dumps({
+            'count': len(matched),
+            'categorizers': index.categorizers,
+            'items': [transactions.encode_item(txn)
+                      for txn in matched[offset:offset + limit]],
+        }))
+
+
 BATCH_RUNNING = "An AI batch run is in progress."
 
 
@@ -384,6 +429,30 @@ class JevBatchHandler(tornado.web.RequestHandler):
                     raise jev.JevError("Invalid request.", 400)
                 self.application.start_jev_batch(msg.get('mode'), msg.get('n'))
         except jev.JevError as exc:
+            self.set_status(exc.status)
+            self.write(json.dumps({'error': str(exc)}))
+            return
+        self.write(json.dumps(None).encode())
+
+
+class ReviewHandler(tornado.web.RequestHandler):
+    """Opens a journal transaction for editing in Candidates, or closes it."""
+
+    def post(self, operation):
+        self.set_header('Content-Type', 'application/json')
+        try:
+            try:
+                msg = json.loads(self.request.body)
+            except ValueError:
+                msg = None
+            if not isinstance(msg, dict):
+                raise jev.JevError("Invalid request.", 400)
+            if operation == 'close':
+                self.application.close_review()
+            else:
+                self.application.open_review(msg)
+        except jev.JevError as exc:
+            self.application.log_status(str(exc))
             self.set_status(exc.status)
             self.write(json.dumps({'error': str(exc)}))
             return
@@ -547,6 +616,7 @@ class Application(tornado.web.Application):
              StaticHandler),
             (r'/%s/(errors|pending|invalid|uncleared)/([^/]*)/(\d+)-(\d+)' %
              secret_key, GetDataHandler),
+            (r'/%s/transactions' % secret_key, TransactionsHandler),
             (r'/%s/websocket' % secret_key, WebSocketHandler),
             (r'/%s/get_file' % secret_key, GetFileHandler),
             (r'/%s/hints/(history|request|classify)' % secret_key, HistoryHintsHandler),
@@ -555,6 +625,7 @@ class Application(tornado.web.Application):
             (r'/%s/skip' % secret_key, SkipHandler),
             (r'/%s/accept_rules' % secret_key, AcceptRulesHandler),
             (r'/%s/jev_batch(?:_(stop))?' % secret_key, JevBatchHandler),
+            (r'/%s/review/(open|close)' % secret_key, ReviewHandler),
             (r'/%s/retrain' % secret_key, RetrainHandler),
         ], **kwargs)
         self.socket_clients = set()
@@ -565,6 +636,8 @@ class Application(tornado.web.Application):
         self.skip_ids = None
         self.jev_run = None  # type: Optional[Dict[str, Any]]
         self.jev_stop_requested = False
+        # The journal transaction open in Candidates for editing, if any.
+        self.review = None  # type: Optional[Transaction]
 
         self.log_status('Initializing')
 
@@ -606,17 +679,21 @@ class Application(tornado.web.Application):
 
     def reset(self):
         self.next_candidates = None
+        self.review = None
         self.current_errors = None
         self.current_invalid = None
         self.current_uncleared = None
         self.current_pending = None
+        # (journal generation, index, last filter, its result)
+        self.transactions_cache = None  # type: Optional[TransactionsCache]
         self.set_state(
+            journal_generation=None,
             pending=None,
             errors=None,
             invalid=None,
             uncleared=None,
             main_journal_path=os.path.realpath(self.reconciler.journal_path),
-            candidates=None, rules_pending=None, ai_pending=None)
+            candidates=None, rules_pending=None, ai_pending=None, review=None)
         # The jev_* settings state is kept during a reload, so the UI does not
         # flash a misleading "Set OPENROUTER_API_KEY"; it is refreshed on load.
         self.ioloop.add_future(self.reconciler.loaded_future,
@@ -672,9 +749,12 @@ class Application(tornado.web.Application):
         end_time = time.time()
         print('Got next candidates in %.4f seconds' % (end_time - start_time))
         generation = self.next_generation()
-        kwargs = dict()
+        # Every change of the journal or of the pending position ends a review.
+        self.review = None
+        kwargs = dict(review=None)  # type: Dict[str, Any]
         if new_pending:
             kwargs.update(
+                journal_generation=generation,
                 pending=(generation, len(loaded_reconciler.pending_data)),
                 uncleared=(generation,
                            len(loaded_reconciler.uncleared_postings)),
@@ -700,6 +780,90 @@ class Application(tornado.web.Application):
                 candidates_generation=generation,
                 pending_index=index,
                 **kwargs)
+
+    def get_transactions(self, generation: int, flt: transactions.Filter):
+        """(index, matching transactions) for the current journal generation,
+        or None if `generation` is stale. Built lazily and cached once."""
+        if generation != self.current_state.get('journal_generation'):
+            return None
+        cache = self.transactions_cache
+        if cache is None or cache.generation != generation:
+            editor = self.reconciler.loaded_future.result().editor
+            index = transactions.Index(editor.entries)
+        elif cache.filter == flt:
+            return cache.index, cache.matched
+        else:
+            index = cache.index
+        matched = index.filter(flt)
+        self.transactions_cache = TransactionsCache(generation, index, flt, matched)
+        return index, matched
+
+    def open_review(self, msg):
+        """Opens a journal transaction in Candidates for editing.
+
+        `msg`: `generation` (journal), `filter` (Transactions tab query
+        arguments) and either `filename` + `lineno` or `move` (first,
+        previous, next or last row of the filtered list, relative to the
+        transaction under review).
+        """
+        if self.jev_running():
+            raise jev.JevError(BATCH_RUNNING, 409)
+        try:
+            flt = transactions.parse_filter(msg.get('filter'))
+        except ValueError as exc:
+            raise jev.JevError("Invalid filter: %s" % exc, 400)
+        generation = msg.get('generation')
+        result = self.get_transactions(generation, flt) if type(generation) is int else None
+        if result is None:
+            raise jev.JevError("The journal changed. Select the transaction again.", 409)
+        index, matched = result
+        move = msg.get('move')
+        if move is None:
+            filename, lineno = msg.get('filename'), msg.get('lineno')
+            txn = next((t for t in index.transactions
+                        if t.meta['filename'] == filename and t.meta.get('lineno') == lineno),
+                       None)
+            if txn is None:
+                raise jev.JevError("Transaction not found.", 404)
+            self._set_review(txn, _position(matched, txn), len(matched))
+            return
+        if move in ('first', 'last'):
+            position = 0 if move == 'first' else len(matched) - 1
+        elif move in ('previous', 'next'):
+            position = _position(matched, self.review)
+            if position is None:
+                raise jev.JevError("The transaction is not in the list.", 409)
+            position += 1 if move == 'next' else -1
+        else:
+            raise jev.JevError("Invalid move.", 400)
+        if not 0 <= position < len(matched):
+            raise jev.JevError("Transaction not found.", 404)
+        self._set_review(matched[position], position, len(matched))
+
+    def _set_review(self, txn: Transaction, offset: Optional[int], count: int):
+        """Opens `txn`, row `offset` (None: not in the list) of `count` rows."""
+        loaded_reconciler = self.reconciler.loaded_future.result()
+        try:
+            candidates = loaded_reconciler.make_review_candidates(txn)
+        except Exception as exc:
+            # E.g. a layout of the entry the line-level rewrite cannot follow.
+            traceback.print_exc()
+            raise jev.JevError("Cannot edit %s:%s: %s" % (
+                txn.meta['filename'], txn.meta.get('lineno'), str(exc) or (
+                    "its layout cannot be rewritten line by line (multi-line "
+                    "strings, tab-indented metadata, ...)")), 422)
+        self.next_candidates = candidates
+        self.review = txn
+        # pending_index and skip_ids stay, so closing returns to the same entry.
+        self.set_state(
+            candidates=self.next_candidates,
+            candidates_generation=self.next_generation(),
+            review=dict(filename=txn.meta['filename'], lineno=txn.meta.get('lineno'),
+                        offset=offset, count=count))
+
+    def close_review(self):
+        if self.review is not None and not self.jev_running():
+            self.get_next_candidates(new_pending=False)
 
     def _broadcast_state_changed(self):
         try:
@@ -747,8 +911,25 @@ class Application(tornado.web.Application):
             if from_hints:
                 raise jev.JevError("Could not apply the change.", 500)
 
+    def _review_next_row(self, msg) -> Optional[Tuple[Transaction, transactions.Filter]]:
+        """The row after the transaction under review in the client's
+        Transactions list (`msg['review_filter']`), if any."""
+        try:
+            flt = transactions.parse_filter(msg.get('review_filter'))
+        except ValueError:
+            return None
+        result = self.get_transactions(self.current_state.get('journal_generation'), flt)
+        position = result and _position(result[1], self.review)
+        if position is None or position + 1 >= len(result[1]):
+            return None
+        return result[1][position + 1], flt
+
     def handle_select_candidate(self, msg):
         if self.jev_running():
+            return None
+        ignore = msg.get('ignore', None) is True
+        # A journal transaction under review can only be rewritten in place.
+        if self.review is not None and ignore:
             return None
         try:
             if (self.next_candidates is not None and msg['generation'] ==
@@ -756,7 +937,7 @@ class Application(tornado.web.Application):
                 index = msg['index']
                 if index >= 0 and index < len(self.next_candidates.candidates):
                     candidate = self.next_candidates.candidates[index]
-                    ignore = msg.get('ignore', None) is True
+                    next_row = self.review is not None and self._review_next_row(msg)
                     result = self.reconciler.loaded_future.result(
                     ).accept_candidate(
                         candidate,
@@ -764,6 +945,18 @@ class Application(tornado.web.Application):
                     )
                     self._notify_modified_files(result.modified_filenames)
                     self.get_next_candidates(new_pending=True)
+                    if next_row:
+                        txn, flt = next_row
+                        # Accepting replaces only the edited transaction, so
+                        # the next row is still in the list.
+                        matched = self.get_transactions(
+                            self.current_state['journal_generation'], flt)[1]
+                        offset = _position(matched, txn)
+                        if offset is not None:
+                            try:
+                                self._set_review(txn, offset, len(matched))
+                            except jev.JevError as exc:
+                                self.log_status(str(exc))
                     return result.new_entries
         except:
             traceback.print_exc()
@@ -834,6 +1027,8 @@ class Application(tornado.web.Application):
             ai_ids = set(map(id, ai_pending))
             pending = [p for p in loaded_reconciler.pending_data if id(p) in ai_ids or
                        loaded_reconciler.get_rules_transaction(p) is not None]
+        # The batch accepts pending entries; no transaction stays under review.
+        self.close_review()
         self.jev_stop_requested = False
         self.jev_run = dict(mode=mode, i=0, n=len(pending), accepted=0, rules=0, below=0,
                             errors=0, skipped=0, running=bool(pending))
@@ -947,6 +1142,11 @@ class Application(tornado.web.Application):
                 self.check_modification()
             elif self.reconciler.loaded_future is loaded_future:
                 self.get_next_candidates(new_pending=True)
+
+
+def _position(matched: list, txn) -> Optional[int]:
+    """Index of `txn` (by identity) in `matched`."""
+    return next((i for i, t in enumerate(matched) if t is txn), None)
 
 
 def parse_arguments(argv, **kwargs):

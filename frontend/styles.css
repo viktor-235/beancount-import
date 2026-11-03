@@ -211,3 +211,17 @@ a {
 .hints-note { padding: 3px 6px; }
 .hints-controls .hints-note { padding: 0; }
 .hints-json { margin: 0; padding: 5px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Transactions tab toolbar: inline filters, wrapping on narrow panels. */
+.transactions-toolbar { flex-wrap: wrap; justify-content: flex-start; align-items: center; column-gap: 8px; }
+.transactions-toolbar .action-button__group { margin: 6px 0; display: inline-flex; align-items: stretch; }
+.transactions-toolbar input, .transactions-toolbar select { box-sizing: border-box; padding: 6px 4px; font: inherit; line-height: 1.2; background: var(--color-main-bg); color: var(--color-main-text); border: 1px solid var(--color-main-accent); border-radius: 5px; }
+.transactions-toolbar input[type="search"] { width: 160px; }
+.action-button.action-button--active { background-color: var(--color-select-bg); color: var(--color-select-text); }
+.transactions-count { margin-left: auto !important; white-space: nowrap; }
+/* Transactions toolbar: every control as high as a button; the date fields
+   are glued, with rounded outer corners only. */
+.transactions-toolbar .action-button, .transactions-toolbar input, .transactions-toolbar select { box-sizing: border-box; height: 33px; margin: 0; }
+.transactions-dates input:first-child { border-radius: 5px 0 0 5px; border-right: none; }
+.transactions-dates input:last-child { border-radius: 0 5px 5px 0; }
+.review-banner { padding: 6px 10px; border-bottom: 1px solid var(--color-main-accent); background-color: var(--color-select-bg); color: var(--color-select-text); }

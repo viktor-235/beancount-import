@@ -56,6 +56,11 @@ CATEGORIZER_KEY = 'categorizer'
 RULES_CATEGORIZER = 'rules'
 # Set on postings accepted by a batch AI run.
 JEV_CATEGORIZER = 'jev'
+# Posting metadata of an automatic booking. Editing a journal transaction
+# drops it from the postings whose account changed.
+JEV_CONFIDENCE_KEY = 'jev_confidence'
+JEV_ACCOUNT_KEY = 'jev_account'
+CATEGORIZER_META_KEYS = frozenset([CATEGORIZER_KEY, JEV_CONFIDENCE_KEY, JEV_ACCOUNT_KEY])
 
 
 def is_rules_categorized(transaction: Transaction) -> bool:
@@ -92,12 +97,21 @@ def include_import_result(import_result: ImportResult,
     return False
 
 
-def _get_transaction_with_substitutions(transaction: Transaction,
-                                        new_accounts: List[str]) -> Transaction:
+def _get_transaction_with_substitutions(
+        transaction: Transaction, new_accounts: List[str],
+        drop_categorizer_meta: Optional[List[bool]] = None) -> Transaction:
+    """Substitutes the unknown accounts in order.
+
+    `drop_categorizer_meta[i]`: remove `CATEGORIZER_META_KEYS` from the
+    posting of the i-th unknown account.
+    """
     new_postings = []
     new_account_i = 0
     for posting in transaction.postings:
         if is_unknown_account(posting.account):
+            if drop_categorizer_meta and drop_categorizer_meta[new_account_i] and posting.meta:
+                posting = posting._replace(meta={
+                    k: v for k, v in posting.meta.items() if k not in CATEGORIZER_META_KEYS})
             posting = posting._replace(account=new_accounts[new_account_i])
             new_account_i += 1
         new_postings.append(posting)
@@ -795,7 +809,10 @@ class LoadedReconciler(object):
                                            transaction: Transaction,
                                            used_transactions: List[Transaction],
                                            predicted_accounts: List[str],
-                                           changes: dict = {}):
+                                           changes: dict = {},
+                                           original_accounts: Optional[List[Optional[str]]] = None):
+        """`original_accounts`: for a review, the account each unknown posting had
+        in the journal (None if it was unknown); see `make_review_candidates`."""
         assert isinstance(changes, dict)
         new_accounts = changes.get('accounts')
         if new_accounts is None:
@@ -829,13 +846,17 @@ class LoadedReconciler(object):
                 transaction,
                 used_transactions,
                 changes=changes,
-                predicted_accounts=predicted_accounts)
+                predicted_accounts=predicted_accounts,
+                original_accounts=original_accounts)
 
+        drop_meta = original_accounts and [
+            original is not None and original != account
+            for original, account in zip(original_accounts, new_accounts)]
         new_transaction = _replace_transaction_properties(transaction, changes)
         real_transaction = _get_transaction_with_substitutions(
-            new_transaction, new_accounts)
+            new_transaction, new_accounts, drop_meta)
         transaction_with_unique_account_names = _get_transaction_with_substitutions(
-            new_transaction, unique_ids)
+            new_transaction, unique_ids, drop_meta)
         existing_used_transactions = [
             t for t in used_transactions
             if id(t) not in self.pending_transaction_ids
@@ -915,6 +936,39 @@ class LoadedReconciler(object):
                 sources=self.sources,
             )
         return result
+
+    def is_category_posting(self, posting: Posting) -> bool:
+        """A posting a review may rebook: known and not tied to a data source."""
+        return (not is_account_unknown(posting) and
+                posting.account not in self.account_source_map)
+
+    def make_review_candidates(self, transaction: Transaction) -> Candidates:
+        """Candidates to edit a journal transaction in place.
+
+        Every category posting becomes its own unknown group, pre-filled with
+        its current account; unknown postings get the classifier prediction.
+        Confirm rewrites the transaction where it is (`change_entry`), and an
+        unchanged one is written back as is.
+        """
+        placeholder = transaction._replace(postings=[
+            p._replace(account=FIXME_ACCOUNT) if self.is_category_posting(p) else p
+            for p in transaction.postings])
+        predictions = iter(self._get_unknown_account_predictions(transaction))
+        original_accounts = [
+            p.account if self.is_category_posting(p) else None
+            for p in transaction.postings
+            if self.is_category_posting(p) or is_account_unknown(p)]
+        predicted_accounts = [account or next(predictions) for account in original_accounts]
+        candidate = self._make_candidate_with_substitutions(
+            placeholder, [transaction], predicted_accounts=predicted_accounts,
+            original_accounts=original_accounts)
+        return Candidates(
+            candidates=[candidate],
+            date=transaction.date,
+            number=self._get_primary_transaction_amount_number(placeholder),
+            pending_data=self.pending_data,
+            sources=self.sources,
+        )
 
     def get_next_candidates(self, skip_ids: Optional[Dict[str, int]] = None):
         if self.pending_data:
@@ -1009,8 +1063,8 @@ class LoadedReconciler(object):
         """Books the unknown posting group of `transaction` to `account`."""
         meta = {
             CATEGORIZER_KEY: JEV_CATEGORIZER,
-            'jev_confidence': Decimal(str(confidence)).quantize(Decimal('0.01')),
-            'jev_account': account,
+            JEV_CONFIDENCE_KEY: Decimal(str(confidence)).quantize(Decimal('0.01')),
+            JEV_ACCOUNT_KEY: account,
         }
         new_transaction = transaction._replace(postings=[
             p._replace(account=account, meta={**(p.meta or {}), **meta})

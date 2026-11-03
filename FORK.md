@@ -12,6 +12,8 @@ transaction. It adds two tools to the candidate review page:
 - **Import rules and batch accept.** Rules categorize imported transactions;
   Accept rules, Accept with AI and Accept rules + AI confirm many pending
   transactions at once.
+- **Transactions tab.** Journal transactions filtered by date, categorizer and
+  text, to review what rules, AI and manual work booked.
 
 Everything else is upstream beancount-import: the data sources, the matching,
 the built-in classifier and the Confirm workflow. The fork is a drop-in
@@ -165,6 +167,49 @@ rules:
     jev_account: "Expenses:Groceries"
   ```
 
+### Transactions tab
+
+![Transactions tab with a transaction open for editing](docs/images/transactions.png)
+
+- The right panel has a **Transactions** tab after Source data. It lists the
+  transactions of the journal files as written (not plugin-processed, the
+  ignored journal excluded), newest first. The count of matching transactions
+  is shown above the list.
+- Filters:
+  - **Dates**: from and to, inclusive, as the browser's native date fields
+    (the display format follows the browser locale); an empty field is an
+    open bound. Presets: This month, Last month, Since last month (the default), This year, All.
+  - **Categorizer**: one select, `categorizer: All`, `categorizer: (none)`
+    (no posting has `categorizer` metadata) or `categorizer: <value>` for a
+    value found in the journal (`rules`, `jev`). A transaction matches when
+    any posting has the value.
+  - **Search**: like Payee history, a case- and punctuation-insensitive
+    substring of payee, narration and metadata, plus account names.
+- Click a transaction to edit it in the Candidates tab; its row is
+  highlighted. Category postings (accounts not tied to a data source, such as
+  expenses, income or cash) become editable account groups, pre-filled with
+  their current accounts; data source postings stay fixed. Payee, narration,
+  tags, links, Payee history and Classify with AI work as for a pending entry.
+- **Confirm** rewrites the transaction in place, in its file; metadata, tags and
+  links are kept. When only a posting's account changes, just the account name
+  is replaced in its line: the amount (elided too), alignment, price and an
+  inline comment stay; comment lines inside the transaction are kept. An
+  edited header line keeps a `txn` flag and a trailing `; comment`. A
+  transaction whose layout cannot be rewritten line by line (multi-line
+  strings, tab-indented metadata) is refused with a message. A posting whose
+  account changed loses its `categorizer`, `jev_confidence` and `jev_account`
+  metadata. An unchanged Confirm does not
+  write the file (CRLF line ends stay too). Ignore is not available.
+- After Confirm the next row of the list opens; after the last row, Candidates
+  returns to the pending entries. First, Previous, Next, Last (and `[`, `]`)
+  move through the rows of the list; **Back to pending** returns without
+  writing. Changes are discarded when you leave the transaction without
+  Confirm, and a journal change (Confirm, batch accept, reload) ends editing.
+  Use the used transaction above the candidate to open it in the Editor.
+- The list refreshes after every Confirm, batch accept and journal reload. The
+  server filters only while the tab is open; the filter is kept while the page
+  is open and resets on reload.
+
 ### Settings file
 
 `--settings PATH` (or `settings=` in a launcher) reads JEV settings from the
@@ -244,10 +289,13 @@ Then open http://127.0.0.1:8106/. See [examples/jev/README.md](examples/jev/READ
 | Backend | New `beancount_import/history_hints.py` (candidate snapshot, history search) and `beancount_import/jev.py` (request building, OpenRouter client) |
 | Backend | `webserver.py`: `/hints/{history,request,classify}` endpoints, a stale-candidate guard on `change_candidate`, and JEV state in the initial state |
 | Backend | JEV settings file (`--settings`, `jev.load_settings`); Accept with AI: `reconcile.py` selects and accepts transactions, `webserver.py` adds `/jev_batch`, `/jev_batch_stop`, the background run and the `ai_pending`/`jev_run` state |
-| Backend | `journal_editor.py`: keeps the plugin-processed entries for history |
+| Backend | `journal_editor.py`: keeps the plugin-processed entries for history; an in-place rewrite keeps comment lines, a header's `txn` flag and trailing comment and, when only the account changes, the original posting line text; a file without changes is not written |
 | Backend | New `beancount_import/import_rules.py`; `reconcile.py` applies the rules to pending transactions and adds Accept rules; `webserver.py` adds `--import_rules`, the `/accept_rules` endpoint and the `rules_pending` count in the state |
-| Frontend | New `history_hints.tsx` and `jev_batch.ts`. Changes to `candidates.tsx` (panel, `c` shortcut, batch buttons) and `styles.css` |
-| Tests | `jev_test.py`, `jev_batch_test.py`, `history_hints_test.py`, `accept_rules_test.py`, `import_rules_test.py`, `frontend/history_hints.test.cjs` and `frontend/jev_batch.test.cjs` (`npm test`) |
+| Backend | New `beancount_import/transactions.py` (Transactions tab filtering); `webserver.py` adds the `/transactions` endpoint and `journal_generation` in the state |
+| Backend | Editing journal transactions: `reconcile.py` `make_review_candidates` (category postings as editable groups, rewritten in place); `webserver.py` adds `/review/(open\|close)`, the `review` state and the next row after Confirm |
+| Frontend | New `transactions.tsx` and `transactions_filter.ts` (Transactions tab, editing in Candidates); `ServerListCache` takes a fetch function |
+| Frontend | New `history_hints.tsx` and `jev_batch.ts`. Changes to `candidates.tsx` (panel, `c` shortcut, batch buttons, editing journal transactions) and `styles.css` |
+| Tests | `jev_test.py`, `jev_batch_test.py`, `history_hints_test.py`, `accept_rules_test.py`, `import_rules_test.py`, `transactions_test.py`, `review_test.py`, `frontend/history_hints.test.cjs`, `frontend/jev_batch.test.cjs` and `frontend/transactions_filter.test.cjs` (`npm test`) |
 | Packaging | `python_requires >= 3.10`. Requires PyYAML. Optional `rules` extra with fava. CI also runs `npm test`. PyPI publishing is removed (the fork is not published to PyPI) |
 
 The source adapters, matching rules and the built-in classifier are unchanged.

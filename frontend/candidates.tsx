@@ -10,8 +10,10 @@ import {
   TransactionProperties,
   executeServerCommand,
   BeancountEntry,
-  JevRun
+  JevRun,
+  ReviewState
 } from "./server_connection";
+import { ReviewMove, reviewMoves } from "./transactions_filter";
 import {
   JevBatchMode,
   JevBatchStatus,
@@ -98,6 +100,12 @@ interface CandidatesComponentProps {
   accounts: string[];
   associatedDataViewController: AssociatedDataViewController;
   candidateSelectionState: CandidateSelectionState;
+  // Set while a journal transaction from the Transactions tab is edited.
+  review?: ReviewState | null;
+  reviewLabel?: string;
+  reviewFilter: () => Record<string, string>;
+  onReviewMove: (move: ReviewMove) => void;
+  onReviewClose: () => void;
 }
 
 export type ActiveInputState = {
@@ -267,6 +275,13 @@ export class CandidatesComponent extends React.PureComponent<
     this.props.serverConnection.skipBy(1);
   };
 
+  private moveReview(move: ReviewMove) {
+    const { review } = this.props;
+    if (review != null && reviewMoves(review.offset, review.count)[move]) {
+      this.props.onReviewMove(move);
+    }
+  }
+
   private skipToFirst = () => {
     this.props.serverConnection.skipTo(0);
   };
@@ -366,9 +381,17 @@ export class CandidatesComponent extends React.PureComponent<
       );
     }
 
+    const { review } = this.props;
     return (
       <>
+        {review != null && (
+          <div className="review-banner">
+            Editing <code>{this.props.reviewLabel}</code> from Transactions:
+            Confirm rewrites it in place.
+          </div>
+        )}
         <div className="action-button-wrapper hints-toolbar-wrapper">
+          {review != null ? this.renderReviewNavigation(review) : (
           <div className="action-button__group">
             <button
               disabled={pendingIndex == 0 || batchRunning}
@@ -396,13 +419,14 @@ export class CandidatesComponent extends React.PureComponent<
             </button>
             <button
               disabled={pendingIndex + 1 >= numPending || batchRunning}
-              onClick={this.skipToNext}
+              onClick={this.skipToLast}
               title="Skip to last pending entry"
               className="action-button"
             >
               Last
             </button>
           </div>
+          )}
           <div className="action-button__group">
             <button
               disabled={!hasAccountSubstitutions || batchRunning}
@@ -482,9 +506,13 @@ export class CandidatesComponent extends React.PureComponent<
               Revert
             </button>
             <button
-              disabled={batchRunning}
+              disabled={batchRunning || review != null}
               onClick={this.handleIgnore}
-              title="Add the selected candidate to the ignore file, keyboard shortcut: i"
+              title={
+                review != null
+                  ? "Not available for a journal transaction"
+                  : "Add the selected candidate to the ignore file, keyboard shortcut: i"
+              }
               className="action-button"
             >
               Ignore
@@ -638,10 +666,12 @@ export class CandidatesComponent extends React.PureComponent<
     }
     switch (event.key) {
       case "[":
-        this.skipToPrior();
+        if (this.props.review != null) this.moveReview("previous");
+        else this.skipToPrior();
         break;
       case "]":
-        this.skipToNext();
+        if (this.props.review != null) this.moveReview("next");
+        else this.skipToNext();
         break;
       case "a":
         this.changeSelectedCandidateAllAccounts();
@@ -714,7 +744,7 @@ export class CandidatesComponent extends React.PureComponent<
         });
         break;
       case "i":
-        this.ignoreCandidate(event.shiftKey);
+        if (this.props.review == null) this.ignoreCandidate(event.shiftKey);
         break;
       case "#":
         this.editCurrentTransaction("tag");
@@ -752,7 +782,9 @@ export class CandidatesComponent extends React.PureComponent<
     const promise = executeServerCommand("select_candidate", {
       index: candidateIndex,
       generation: this.props.candidatesGeneration,
-      ignore
+      ignore,
+      review_filter:
+        this.props.review != null ? this.props.reviewFilter() : undefined
     });
     promise.then((newEntries: BeancountEntry[]) => {
       if (newEntries.length > 0) {
@@ -853,6 +885,37 @@ export class CandidatesComponent extends React.PureComponent<
       jevSettingsError: this.props.jevSettingsError,
       run: this.props.jevRun
     };
+  }
+
+  private renderReviewNavigation(review: ReviewState) {
+    const moves = reviewMoves(review.offset, review.count);
+    const batchRunning = isBatchRunning(this.props.jevRun);
+    const button = (move: ReviewMove, label: string, title: string) => (
+      <button
+        disabled={!moves[move] || batchRunning}
+        onClick={() => this.moveReview(move)}
+        title={title}
+        className="action-button"
+      >
+        {label}
+      </button>
+    );
+    return (
+      <div className="action-button__group">
+        {button("first", "First", "Edit the first transaction of the Transactions list")}
+        {button("previous", "Previous", "Edit the previous transaction of the Transactions list, keyboard shortcut: [")}
+        {button("next", "Next", "Edit the next transaction of the Transactions list, keyboard shortcut: ]")}
+        {button("last", "Last", "Edit the last transaction of the Transactions list")}
+        <button
+          disabled={batchRunning}
+          onClick={this.props.onReviewClose}
+          title="Discard changes and return to the pending entries"
+          className="action-button"
+        >
+          Back to pending
+        </button>
+      </div>
+    );
   }
 
   private renderBatchButton(mode: JevBatchMode, title: string) {

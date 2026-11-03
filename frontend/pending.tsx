@@ -43,7 +43,7 @@ const PendingEntryElement = styled.div<
   )};
 `;
 
-const PendingEntryFormattedElement = styled.div`
+export const PendingEntryFormattedElement = styled.div`
   font-family: var(--font-fam-mono);
   font-size: var(--font-size-mono-reg);
   white-space: pre;

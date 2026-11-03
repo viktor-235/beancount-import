@@ -8,7 +8,7 @@
     "builddev:watch": "npm run builddev -- --watch",
     "tsc": "tsc --noEmit",
     "format": "prettier --write **/*.ts **/*.tsx",
-    "test": "node --test history_hints.test.cjs jev_batch.test.cjs"
+    "test": "node --test history_hints.test.cjs jev_batch.test.cjs transactions_filter.test.cjs"
   },
   "repository": {
     "type": "git",

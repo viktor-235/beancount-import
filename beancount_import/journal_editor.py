@@ -424,6 +424,9 @@ class JournalEditor(object):
             raise RuntimeError(
                 'Journal file modified concurrently: %r' % filename)
 
+        if new_lines == self.get_journal_lines(filename)[1]:
+            # Nothing changed: leave the file as it is (e.g. CRLF line ends).
+            return
         writer = _AtomicWriter(
             filename, mode='w+', encoding='utf-8', newline='\n', overwrite=True)
         with writer.open() as f:
@@ -608,6 +611,12 @@ class LineChangeBuilder(object):
         if self.orig_lineno > 0 and self.lines[self.orig_lineno - 1].strip():
             self.add_lines('')
 
+    def keep_comment_lines(self):
+        """Keeps indented comment-only lines (`  ; note`) inside an entry."""
+        while (self.orig_lineno < self.line_range[1]
+               and comment_line_re.match(self.lines[self.orig_lineno])):
+            self.keep_line()
+
     def match_metadata(self, meta: Meta):
         assert os.path.realpath(meta['filename']) == self.filename
         assert meta['lineno'] == self.orig_lineno + 1
@@ -663,6 +672,7 @@ def get_meta_ignore() -> FrozenSet[str]:
 META_IGNORE = get_meta_ignore()
 
 metadata_line_re = '^ +([a-z][a-zA-Z0-9\\-_]*) *: *([^a-zA-Z].*)$'
+comment_line_re = re.compile(r'^\s+;')
 
 
 def compute_metadata_changes(builder, old_meta, new_meta, indent):
@@ -676,6 +686,7 @@ def compute_metadata_changes(builder, old_meta, new_meta, indent):
     old_meta_not_seen = set(old_meta.keys())
     old_meta_not_seen.difference_update(META_IGNORE)
     while True:
+        builder.keep_comment_lines()
         line = builder.cur_orig_line
         if line is None:
             break
@@ -706,15 +717,66 @@ def get_posting_line(posting: Posting) -> str:
     return ('  %s  %s' % (flag_account, position_str)).rstrip()
 
 
+def replace_posting_account(line: str, old_account: str,
+                            new_account: str) -> Optional[str]:
+    """Replaces the account token of a posting line, keeping the rest of it.
+
+    The whitespace after the account is adjusted so that the amount stays in
+    its column (at least one space is kept); whitespace containing a tab is
+    kept as it is.  Returns None if the account token is not found.
+    """
+    m = re.match(r'^(\s+(?:\S\s+)?)' + re.escape(old_account) + r'(?=\s|$)(\s*)',
+                 line)
+    if m is None:
+        return None
+    space = m.group(2)
+    rest = line[m.end():]
+    if rest and not rest.startswith(';') and '\t' not in space:
+        space = ' ' * max(min(len(space), 2),
+                          len(space) + len(old_account) - len(new_account))
+    return m.group(1) + new_account + space + rest
+
+
+# A header line split into its text and an optional trailing `; comment`
+# (a `;` inside a quoted string is not a comment).
+_header_comment_re = re.compile(r'((?:[^";]|"(?:[^"\\]|\\.)*")*?)(\s*;.*)?')
+
+
+def rerender_header_line(orig_line: Optional[str], new_line: str) -> str:
+    """Returns the printed header `new_line` with the original line's spelling.
+
+    Keeps a `txn` flag written as such and a trailing `; comment` of
+    `orig_line`, which the printer would drop.
+    """
+    if orig_line is None:
+        return new_line
+    if (re.match(r'\S+\s+txn(?=\s|$)', orig_line)
+            and re.match(r'\S+ \* ', new_line + ' ')):
+        new_line = re.sub(r'^(\S+ )\*', r'\1txn', new_line, count=1)
+    m = _header_comment_re.fullmatch(orig_line)
+    if m is not None and m.group(2):
+        new_line += m.group(2)
+    return new_line
+
+
 def compute_posting_changes(builder: LineChangeBuilder, old_posting: Posting,
                             new_posting: Posting):
+    builder.keep_comment_lines()
     builder.match_metadata(old_posting.meta)
     old_posting_line = get_posting_line(old_posting)
     new_posting_line = get_posting_line(new_posting)
     if old_posting_line == new_posting_line:
         builder.keep_line()
     else:
-        builder.replace_line(new_posting_line)
+        line = None
+        if (old_posting._replace(account=new_posting.account, meta=None)
+                == new_posting._replace(meta=None)):
+            # Only the account changed: keep the amount, its formatting and an
+            # inline comment as written.
+            line = replace_posting_account(builder.cur_orig_line,
+                                           old_posting.account,
+                                           new_posting.account)
+        builder.replace_line(line if line is not None else new_posting_line)
     compute_metadata_changes(
         builder=builder,
         old_meta=old_posting.meta,
@@ -906,7 +968,9 @@ class StagedChanges(object):
                         # First line is the same
                         builder.keep_line()
                     else:
-                        builder.replace_line(new_print_result[0].rstrip())
+                        builder.replace_line(
+                            rerender_header_line(builder.cur_orig_line,
+                                                 new_print_result[0].rstrip()))
                     compute_metadata_changes(
                         builder=builder,
                         old_meta=old_entry.meta,
@@ -942,6 +1006,8 @@ class StagedChanges(object):
                                     new_posting_lines.extend(
                                         metadata_text.split('\n'))
                                 builder.add_lines(new_posting_lines)
+                        if next_old_posting_i == len(old_entry.postings):
+                            builder.keep_comment_lines()
                         # Delete all remaining old postings
                         builder.delete_until(builder.line_range[1])
 

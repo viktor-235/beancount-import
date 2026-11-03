@@ -9,7 +9,9 @@ import {
   PendingEntry,
   UnclearedPosting,
   InvalidReference,
-  JournalError
+  JournalError,
+  TransactionItem,
+  executeServerCommand
 } from "./server_connection";
 import {
   EditorComponent,
@@ -22,6 +24,16 @@ import { InvalidReferencesComponent } from "./invalid_references";
 import { UnclearedPostingsComponent } from "./uncleared";
 import { SourceDataComponent } from "./source_data";
 import { SettingsComponentState, SettingsComponent } from "./settings";
+import {
+  loadTransactionsFilter,
+  TransactionsComponent,
+  TransactionsListState
+} from "./transactions";
+import {
+  filterArgs,
+  ReviewMove,
+  TransactionsFilter
+} from "./transactions_filter";
 
 import commonPrefix from "common-prefix";
 
@@ -113,7 +125,8 @@ enum TabKeys {
 enum DataTabKeys {
   pending,
   journal,
-  source
+  source,
+  transactions
 }
 
 function enumValueFor<U>(
@@ -158,6 +171,10 @@ class AppComponent
     this.props.serverConnection,
     "errors"
   );
+  private transactionsListState = new TransactionsListState(
+    this.props.serverConnection,
+    loadTransactionsFilter()
+  );
 
   private serverListener = (state: Partial<ServerState>) => {
     if (
@@ -168,6 +185,14 @@ class AppComponent
         this.state.pending_index !== state.pending_index)
     ) {
       this.pendingListState.scrollState.scrollToIndex(state.pending_index);
+    }
+    if (
+      state.review != null &&
+      state.review !== this.state.review &&
+      state.review.offset != null
+    ) {
+      // After Confirm the next row opens; show it in the list.
+      this.transactionsListState.scrollToRow(state.review.offset);
     }
     this.setState(state);
   };
@@ -347,6 +372,17 @@ class AppComponent
                         jevRun={this.state.jev_run}
                         candidatesGeneration={this.state.candidates_generation!}
                         candidates={this.state.candidates!}
+                        review={this.state.review}
+                        reviewLabel={
+                          this.state.review == null
+                            ? undefined
+                            : `${this.state.review.filename.slice(
+                                commonJournalPrefix.length
+                              )}:${this.state.review.lineno}`
+                        }
+                        reviewFilter={this.reviewFilter}
+                        onReviewMove={this.moveReview}
+                        onReviewClose={this.closeReview}
                         highlightPending={this.highlightPending}
                         candidateSelectionState={this.candidateSelectionState}
                       />
@@ -385,6 +421,7 @@ class AppComponent
                     </Tab>
                     <Tab>Editor</Tab>
                     <Tab>Source data</Tab>
+                    <Tab>Transactions</Tab>
                   </TabList>
                   <AppTabPanel>
                     {this.state.pending != null && (
@@ -409,6 +446,13 @@ class AppComponent
                       candidateSelectionState={this.candidateSelectionState}
                     />
                   </AppTabPanel>
+                  <AppTabPanel>
+                    <TransactionsComponent
+                      listState={this.transactionsListState}
+                      review={this.state.review}
+                      onOpen={this.openReview}
+                    />
+                  </AppTabPanel>
                 </AppTabs>
               </SplitChild>
             </SplitContainer>
@@ -425,6 +469,57 @@ class AppComponent
       </AssociatedDataViewContext.Provider>
     );
   }
+
+  private reviewFilter = () => filterArgs(this.transactionsListState.filter);
+
+  /**
+   * `generation`, `filter`: the journal generation and filter of the list
+   * `msg` refers to (the list a clicked row comes from); the server answers
+   * 409 if the generation is stale.
+   */
+  private requestReview(
+    msg: object,
+    generation = this.state.journal_generation,
+    filter = this.transactionsListState.filter
+  ): Promise<boolean> {
+    if (generation == null || this.state.journalDirty) {
+      return Promise.resolve(false);
+    }
+    // Errors (stale journal, batch run) are shown in the status bar.
+    return executeServerCommand("review/open", {
+      generation,
+      filter: filterArgs(filter),
+      ...msg
+    }).then(
+      result => result == null,
+      () => false
+    );
+  }
+
+  /** Opens a row of the Transactions tab in Candidates for editing. */
+  private openReview = (
+    item: TransactionItem,
+    generation: number,
+    filter: TransactionsFilter
+  ) => {
+    this.requestReview(
+      { filename: item.filename, lineno: item.lineno },
+      generation,
+      filter
+    ).then(opened => {
+      if (opened) {
+        this.setState({ selectedTab: TabKeys.candidates });
+      }
+    });
+  };
+
+  private moveReview = (move: ReviewMove) => {
+    this.requestReview({ move });
+  };
+
+  private closeReview = () => {
+    executeServerCommand("review/close", {});
+  };
 
   private handleSelectPending = (index: number) => {
     this.setState({ selectedTab: TabKeys.candidates });

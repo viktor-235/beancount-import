@@ -5,13 +5,24 @@ import {
   ServerConnection,
   ServerDataType,
   ServerListCache,
-  ServerState
+  ServerState,
+  serverDataFetcher
 } from "./server_connection";
 import { VirtualList, VirtualListScrollState } from "./virtual_list";
 
-type ServerListMetadata = [number, number];
+/** generation, length */
+export type ServerListMetadata = [number, number];
 
-export class ServerVirtualListState<T> {
+/** What ServerVirtualListComponent reads; the emitter emits "change"
+ * with the new metadata. */
+export interface ServerVirtualListSource<T> {
+  cache: ServerListCache<T>;
+  scrollState: VirtualListScrollState;
+  metadata?: ServerListMetadata;
+  emitter: EventEmitter;
+}
+
+export class ServerVirtualListState<T> implements ServerVirtualListSource<T> {
   cache: ServerListCache<T>;
   scrollState = new VirtualListScrollState();
   metadata?: ServerListMetadata;
@@ -29,7 +40,10 @@ export class ServerVirtualListState<T> {
     private serverConnection: ServerConnection,
     public dataType: ServerDataType
   ) {
-    this.cache = new ServerListCache<T>(dataType);
+    this.cache = new ServerListCache<T>(
+      serverDataFetcher<T>(dataType),
+      dataType
+    );
     this.serverListener(serverConnection.state);
     this.serverConnection.addListener(this.serverListener);
   }
@@ -40,7 +54,7 @@ export class ServerVirtualListState<T> {
 }
 
 export interface ServerVirtualListComponentProps<T> {
-  listState: ServerVirtualListState<T>;
+  listState: ServerVirtualListSource<T>;
   className?: string;
   renderItem: (item: T, index: number, ref: React.RefObject<any>) => any;
 }
