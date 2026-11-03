@@ -4,6 +4,7 @@ The YAML format and the actions are described in the "Import rules" section of
 FORK.md.
 """
 
+import string
 from typing import Any, Dict, List, NamedTuple, Tuple
 
 import yaml
@@ -11,8 +12,9 @@ from beancount.core.data import Transaction
 
 from .matching import is_unknown_account
 
-_ACTIONS = ('setAccount', 'addPostingMeta', 'setPayee', 'setNarration',
-            'addTags', 'addMeta')
+_ACTIONS = ('setAccount', 'addPostingMeta', 'removePostingMeta', 'setPayee',
+            'setNarration', 'addTags', 'addMeta')
+_TEMPLATES = ('setPayee', 'setNarration')
 
 
 class Rule(NamedTuple):
@@ -40,6 +42,18 @@ def load_rules(path: str) -> List[Rule]:
         if set(item) - {'filter', *_ACTIONS} or 'filter' not in item:
             raise ValueError('%s: rule %d: expected "filter" and %s, got %s' %
                              (path, i, ', '.join(_ACTIONS), sorted(item)))
+        remove = item.get('removePostingMeta', [])
+        if not (isinstance(remove, list) and
+                all(isinstance(k, str) for k in remove)):
+            raise ValueError('%s: rule %d: removePostingMeta must be a list of '
+                             'keys' % (path, i))
+        for key in _TEMPLATES:
+            if key in item:
+                try:
+                    list(string.Formatter().parse(str(item[key])))
+                except ValueError as e:
+                    raise ValueError('%s: rule %d: %s: %s' %
+                                     (path, i, key, e)) from None
         actions = {k: v for k, v in item.items() if k != 'filter'}
         rules.append(Rule(i, AdvancedFilter(item['filter']), actions))
     return rules
@@ -53,7 +67,9 @@ def apply_rules(rules: List[Rule], txn: Transaction
     # Some sources leave tags or meta as None.
     tags = set(txn.tags or ())
     meta = dict(txn.meta or {})
+    removed_posting_meta = set()  # type: set
     warnings = []
+    name = txn.payee or txn.narration
     matched = False
     for rule in rules:
         if not rule.filter.apply([txn]):
@@ -64,18 +80,29 @@ def apply_rules(rules: List[Rule], txn: Transaction
                 tags.update(value.replace('#', '').split())
             elif key == 'addMeta':
                 meta.update(value)
+            elif key == 'removePostingMeta':
+                removed_posting_meta.update(value)
             elif key not in values:
                 values[key] = value
                 set_by[key] = rule.index
             elif values[key] != value:
                 warnings.append('%s: rules %d and %d disagree on %s, using %r' %
-                                (txn.payee or txn.narration, set_by[key],
+                                (name, set_by[key],
                                  rule.index, key, values[key]))
     if not matched:
         return txn, warnings
+    for key in _TEMPLATES:
+        if key in values:
+            try:
+                values[key] = str(values[key]).format_map(meta)
+            except (LookupError, AttributeError, ValueError) as e:
+                warnings.append('%s: rule %d: cannot fill %s: %r' %
+                                (name, set_by[key], key, e))
+                del values[key]
     postings = txn.postings
     if 'setAccount' in values:
-        posting_meta = values.get('addPostingMeta', {})
+        posting_meta = {k: v for k, v in values.get('addPostingMeta', {}).items()
+                        if k not in removed_posting_meta}
         postings = [
             p._replace(account=values['setAccount'],
                        meta={**(p.meta or {}), **posting_meta})

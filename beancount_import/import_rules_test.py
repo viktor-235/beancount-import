@@ -80,9 +80,39 @@ def test_apply_rules(tmp_path):
     assert import_rules.apply_rules(rules, original) == (original, [])
 
 
+def test_meta_narration_without_auto_confirm(tmp_path):
+    rules = import_rules.load_rules(load(tmp_path, RULES.replace('rules:\n', """
+rules:
+  - filter: 'tag:"."'
+    setNarration: '{tag} ({{raw}})'
+    removePostingMeta: [categorizer]
+""")))
+
+    tagged = transaction(1, 'Spotify AB', 10)
+    tagged.meta['tag'] = 'family plan'
+    txn, warnings = import_rules.apply_rules(rules, tagged)
+    assert txn.narration == 'family plan ({raw})'
+    assert txn.postings[1].account == 'Expenses:Music'
+    assert txn.postings[1].meta == {}
+    assert len(warnings) == 2  # setNarration and setAccount disagree
+
+    txn, _ = import_rules.apply_rules(rules, transaction(1, 'Spotify AB', 10))
+    assert txn.narration == 'Spotify'
+    assert txn.postings[1].meta == {'categorizer': 'rules'}
+
+    rules = import_rules.load_rules(load(
+        tmp_path, "rules: [{filter: 'payee:Nobody', setPayee: '{missing}'}]"))
+    txn, warnings = import_rules.apply_rules(rules, transaction(1, 'Nobody', 1))
+    assert txn.payee == 'Nobody'
+    assert warnings == ["Nobody: rule 1: cannot fill setPayee: "
+                        "KeyError('missing')"]
+
+
 def test_invalid_rules(tmp_path):
     for text in ('rule: []', 'rules: [{filter: x, setCategory: A}]',
                  'rules: [{filter: x, addPostingMeta: {a: b}}]',
+                 'rules: [{filter: x, removePostingMeta: categorizer}]',
+                 'rules: [{filter: x, setNarration: "{tag"}]',
                  'rules: [{setAccount: A}]'):
         try:
             import_rules.load_rules(load(tmp_path, text))

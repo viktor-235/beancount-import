@@ -89,12 +89,23 @@ rules:
 |---|---|
 | `setAccount` | Replaces every unknown account (`Expenses:FIXME` and `Expenses:FIXME:*`) |
 | `addPostingMeta` | Metadata for that posting; needs `setAccount` |
-| `setPayee`, `setNarration` | Replace the payee or narration |
+| `removePostingMeta` | Drops these keys from `addPostingMeta` of any rule: `[categorizer]` |
+| `setPayee`, `setNarration` | Replace the payee or narration; `{key}` inserts transaction metadata |
 | `addTags`, `addMeta` | Add tags (`"#a #b"`) or transaction metadata |
 
-- Matching rules apply in order. Tags and metadata accumulate; for the other
-  actions the first rule wins, and a different value from a later rule is
-  reported as a warning.
+- Matching rules apply in order. Tags, metadata and `removePostingMeta`
+  accumulate; for the other actions the first rule wins, and a different value
+  from a later rule is reported as a warning.
+- `{key}` takes the value from the transaction metadata (after `addMeta`);
+  `{{` and `}}` are literal braces. A missing key leaves the field unchanged
+  with a warning. To let a note from the bank override other rules and keep the
+  transaction out of Accept rules, put such a rule first:
+
+  ```yaml
+  - filter: 'ing_tag:"."'
+    setNarration: '{ing_tag}'
+    removePostingMeta: [categorizer]
+  ```
 - Fava filters ignore case. A quote inside a filter string needs the other
   quote style: `payee:'^IP "OSPANOVA"$'`.
 - Top-level keys starting with `x-` only hold YAML anchors. `<<` replaces
