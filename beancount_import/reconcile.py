@@ -17,7 +17,9 @@ import beancount.parser.printer
 
 from . import training
 from . import matching
+from . import history_hints
 from . import import_rules
+from . import jev
 from . import journal_editor
 from .source import ImportResult, load_source, SourceResults, Source, LogFunction, AssociatedData, InvalidSourceReference, invalid_source_reference_sort_key
 from .posting_date import get_posting_date
@@ -52,6 +54,8 @@ def is_account_unknown(posting: Posting) -> bool:
 # Posting metadata set by the importer's rule-based categorizer.
 CATEGORIZER_KEY = 'categorizer'
 RULES_CATEGORIZER = 'rules'
+# Set on postings accepted by a batch AI run.
+JEV_CATEGORIZER = 'jev'
 
 
 def is_rules_categorized(transaction: Transaction) -> bool:
@@ -193,6 +197,7 @@ class Candidate(object):
             substituted_accounts: Optional[List[AccountSubstitution]] = None,
             original_transaction_properties: Optional[dict] = None,
             substitute: Optional[Callable[[Dict[str, Any]], 'Candidate']] = None,
+            jev_settings: Optional[jev.JevSettings] = None,
     ) -> None:
         self.staged_changes = staged_changes
         self.staged_changes_with_unique_account_names = staged_changes_with_unique_account_names
@@ -206,6 +211,9 @@ class Candidate(object):
 
         # If not None, Function that when called with list of account names (of same length as substituted_accounts) returns a new candidate.
         self.substitute = substitute
+
+        # Settings of the reconciler that built the candidate; None if invalid.
+        self.jev_settings = jev_settings
 
         self.used_transaction_ids = None  # type: Optional[List[int]]
         self.associated_data = []  # type: List[AssociatedData]
@@ -408,6 +416,7 @@ class LoadedReconciler(object):
         self.price_values = set()  # type: Set[Tuple[datetime.date, str, Amount]]
         all_source_results = self._prepare_sources()
         self._load_import_rules()
+        self._load_jev_settings()
         self._preprocess_entries()
         self._match_sources(all_source_results)
         all_skip_accounts = set()
@@ -464,6 +473,19 @@ class LoadedReconciler(object):
         except Exception as e:
             self.errors.append(
                 ('error', 'Import rules disabled: %s' % e, {'filename': path}))
+
+    def _load_jev_settings(self):
+        # Reloaded with the journal, like the import rules.
+        path = self.reconciler.options.get('settings')
+        self.jev_settings_error = None  # type: Optional[str]
+        try:
+            self.jev_settings = jev.load_settings(
+                path)  # type: Optional[jev.JevSettings]
+        except Exception as e:
+            self.jev_settings = None
+            self.jev_settings_error = str(e)
+            self.errors.append(
+                ('error', 'JEV disabled: %s' % e, {'filename': path}))
 
     def _preprocess_entries(self):
         posting_db = self.posting_db
@@ -850,7 +872,8 @@ class LoadedReconciler(object):
                 payee=transaction.payee,
                 narration=transaction.narration,
             ),
-            substitute=substitute)
+            substitute=substitute,
+            jev_settings=self.jev_settings)
 
     def _make_candidates_from_import_result(self, next_pending):
         if len(next_pending.entries) == 1 and isinstance(
@@ -917,7 +940,7 @@ class LoadedReconciler(object):
             skip_ids[pending.id] += 1
         return skip_ids
 
-    def _get_rules_transaction(self, pending: PendingEntry) -> Optional[Transaction]:
+    def get_rules_transaction(self, pending: PendingEntry) -> Optional[Transaction]:
         """The transaction of `pending` if it can be accepted without review.
 
         Pending entries that match other transactions are left for review, since
@@ -933,20 +956,69 @@ class LoadedReconciler(object):
         return transaction
 
     def count_rules_pending(self) -> int:
-        return sum(self._get_rules_transaction(p) is not None for p in self.pending_data)
+        return sum(self.get_rules_transaction(p) is not None for p in self.pending_data)
 
     def accept_rules_candidates(self) -> List[AcceptCandidateResult]:
         """Accepts every pending transaction fully categorized by import rules."""
         results = []
         for pending in list(self.pending_data):
             # Checked again, since each accept changes the posting database.
-            transaction = self._get_rules_transaction(pending)
-            if transaction is None:
-                continue
-            candidate = self._make_candidate_with_substitutions(
-                transaction, [transaction], predicted_accounts=[])
-            results.append(self.accept_candidate(candidate))
+            transaction = self.get_rules_transaction(pending)
+            if transaction is not None:
+                results.append(self.accept_rules_transaction(transaction))
         return results
+
+    def accept_rules_transaction(self, transaction: Transaction) -> AcceptCandidateResult:
+        """Accepts a transaction returned by `get_rules_transaction` as is."""
+        return self.accept_candidate(self._make_candidate_with_substitutions(
+            transaction, [transaction], predicted_accounts=[]))
+
+    def get_ai_transaction(self, pending: PendingEntry) -> Optional[Transaction]:
+        """The transaction of `pending` if a batch AI run may classify it.
+
+        Like Accept rules, pending entries that match other transactions are
+        left for review. Journal FIXME transactions are included.
+        """
+        if self.jev_settings is None or len(pending.entries) != 1:
+            return None
+        transaction = pending.entries[0]
+        if (not isinstance(transaction, Transaction) or
+                len(set(training.get_unknown_account_group_numbers(transaction))) != 1):
+            return None
+        if jev.skip_match(self.jev_settings,
+                          history_hints.transaction_text(transaction)) is not None:
+            return None
+        if matching.get_extended_transactions(transaction, posting_db=self.posting_db):
+            return None
+        return transaction
+
+    def get_ai_pending(self) -> List[PendingEntry]:
+        return [p for p in self.pending_data if self.get_ai_transaction(p) is not None]
+
+    def count_ai_pending(self) -> int:
+        return len(self.get_ai_pending())
+
+    def make_ai_candidate(self, transaction: Transaction) -> Candidate:
+        """The candidate Classify with AI would see, without predictions."""
+        return self._make_candidate_with_substitutions(
+            transaction, [transaction],
+            predicted_accounts=training.get_unknown_account_names(transaction))
+
+    def accept_ai_candidate(self, transaction: Transaction, account: str,
+                            confidence: float) -> AcceptCandidateResult:
+        """Books the unknown posting group of `transaction` to `account`."""
+        meta = {
+            CATEGORIZER_KEY: JEV_CATEGORIZER,
+            'jev_confidence': Decimal(str(confidence)).quantize(Decimal('0.01')),
+            'jev_account': account,
+        }
+        new_transaction = transaction._replace(postings=[
+            p._replace(account=account, meta={**(p.meta or {}), **meta})
+            if is_account_unknown(p) else p for p in transaction.postings
+        ])
+        candidate = self._make_candidate_with_substitutions(
+            new_transaction, [transaction], predicted_accounts=[])
+        return self.accept_candidate(candidate)
 
     def accept_candidate(self, candidate: Candidate, ignore=False) -> AcceptCandidateResult:
         ignored_path = self.editor.ignored_path

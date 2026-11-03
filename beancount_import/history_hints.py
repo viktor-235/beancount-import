@@ -14,6 +14,11 @@ from beancount.parser.printer import EntryPrinter
 from . import jev
 
 
+def transaction_text(transaction):
+    """The transaction as JEV receives it and skip patterns see it."""
+    return EntryPrinter()(transaction).rstrip()
+
+
 def candidate_snapshot(candidate):
     """Restore unknown accounts in a copy; preserve edits and merged postings."""
     substitutions = {s.unique_name: s for s in candidate.substituted_accounts or []}
@@ -34,7 +39,7 @@ def candidate_snapshot(candidate):
             group["postings"].append(str(posting.units) + " · " + posting.account)
         postings.append(posting)
     transaction = transaction._replace(postings=postings)
-    raw = EntryPrinter()(transaction).rstrip()
+    raw = transaction_text(transaction)
     # No random substitution IDs or predicted accounts: applying a suggestion
     # must not invalidate the answer to the original question.
     token = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -96,7 +101,7 @@ def summarize(entries, query):
         for account, count in counts.most_common()]}
 
 
-def build_context(editor, candidate, group_number, account_filters=None):
+def build_context(editor, candidate, group_number, is_category=None):
     snapshot = candidate_snapshot(candidate)
     if snapshot is None:
         raise jev.JevError("Select a transaction candidate.", 422)
@@ -104,9 +109,10 @@ def build_context(editor, candidate, group_number, account_filters=None):
     group = next((g for g in info["groups"] if g["number"] == group_number), None)
     if group is None or type(group_number) is not int:
         raise jev.JevError("Select an editable posting group.", 422)
-    is_category = jev.account_filter(account_filters)
+    if is_category is None:
+        is_category = jev.account_filter()
     context = jev.build_context(history_entries(editor, candidate), transaction,
-                                EntryPrinter()(transaction).rstrip(), is_category)
+                                transaction_text(transaction), is_category)
     context["target_group"] = {"number": group_number,
                                "posting_indices": group["posting_indices"],
                                "postings": group["postings"]}

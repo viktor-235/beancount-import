@@ -107,6 +107,8 @@ export interface CandidateHints {
   payee: string;
   transaction: string;
   groups: { number: number; posting_indices: number[]; postings: string[] }[];
+  // First JEV skip pattern (settings file) found in `transaction`.
+  skip_pattern?: string | null;
 }
 
 export interface Candidate {
@@ -151,9 +153,25 @@ export interface PendingEntry {
 
 export type GenerationAndCount = [number, number];
 
+export interface JevRun {
+  mode: "ai" | "rules_ai";
+  i: number;
+  n: number;
+  accepted: number;
+  rules: number;
+  below: number;
+  errors: number;
+  skipped: number;
+  running: boolean;
+}
+
 export interface ServerState {
-  jev_configured: boolean;
-  jev_default_instructions?: string;
+  // OPENROUTER_API_KEY set and a valid settings file.
+  jev_enabled: boolean;
+  jev_settings_error?: string | null;
+  // Fraction in [0, 1].
+  jev_valid_confidence?: number | null;
+  jev_run?: JevRun | null;
   opened: boolean;
   closed: boolean;
   message: string;
@@ -167,6 +185,7 @@ export interface ServerState {
   action_sounds: [string, string][];
   pending: GenerationAndCount | null;
   rules_pending: number | null;
+  ai_pending: number | null;
   errors: GenerationAndCount | null;
   uncleared: GenerationAndCount | null;
   invalid: GenerationAndCount | null;

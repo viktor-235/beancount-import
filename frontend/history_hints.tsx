@@ -5,14 +5,7 @@ import {
   BeancountTransaction,
   secretKey,
 } from "./server_connection";
-import {
-  JEV_SETTINGS_EVENT,
-  isJevAnswerValid,
-  jevSkipMatch,
-  loadJevAccountFilters,
-  loadJevInstructions,
-  loadJevSkipPatterns,
-} from "./jev_settings";
+import { isJevAnswerValid, percent } from "./jev_batch";
 
 interface HistoryRow {
   account: string;
@@ -28,7 +21,11 @@ interface Props {
   candidate: Candidate;
   candidateIndex: number;
   generation: number;
-  configured: boolean;
+  // OPENROUTER_API_KEY set and a valid settings file.
+  jevEnabled: boolean;
+  jevSettingsError?: string | null;
+  validConfidence: number;
+  batchRunning: boolean;
   toolbar: HTMLElement | null;
 }
 interface State {
@@ -46,12 +43,6 @@ interface State {
   preview?: string;
   previewError?: string;
   applyError?: string;
-}
-
-export function percent(value: number) {
-  return value > 0 && value < 0.0001
-    ? "<0.01%"
-    : `${Math.round(value * 10000) / 100}%`;
 }
 
 export class HistoryHintsComponent extends React.Component<Props, State> {
@@ -82,15 +73,12 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
 
   componentDidMount() {
     this.mounted = true;
-    window.addEventListener(JEV_SETTINGS_EVENT, this.handleSettingsChange);
     this.loadHistory();
   }
   componentWillUnmount() {
     this.mounted = false;
-    window.removeEventListener(JEV_SETTINGS_EVENT, this.handleSettingsChange);
     this.invalidate();
   }
-  private handleSettingsChange = () => this.forceUpdate();
   componentDidUpdate(previous: Props) {
     const before = previous.candidate.hints;
     const after = this.props.candidate.hints;
@@ -129,14 +117,20 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
     if (this.state.group === undefined) return "Select a posting group first.";
     return "";
   }
+  // Show request needs valid settings, but no API key.
+  private get previewDisabledReason() {
+    if (this.disabledReason) return this.disabledReason;
+    if (this.props.jevSettingsError)
+      return `JEV disabled: ${this.props.jevSettingsError}`;
+    return "";
+  }
   private get aiDisabledReason() {
     const hints = this.props.candidate.hints;
-    const skip =
-      hints && jevSkipMatch(loadJevSkipPatterns(), hints.transaction);
-    if (skip !== undefined)
-      return `Skipped for AI by the settings pattern ${skip}`;
-    if (this.disabledReason) return this.disabledReason;
-    if (!this.props.configured)
+    if (this.props.batchRunning) return "An AI batch run is in progress.";
+    if (hints && hints.skip_pattern)
+      return `Skipped for AI by the settings pattern ${hints.skip_pattern}`;
+    if (this.previewDisabledReason) return this.previewDisabledReason;
+    if (!this.props.jevEnabled)
       return "Set OPENROUTER_API_KEY on the importer server.";
     return "";
   }
@@ -156,9 +150,6 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
             candidate_index: this.props.candidateIndex,
             token: hints && hints.token,
             group_number: this.state.group,
-            account_filters: loadJevAccountFilters(),
-            skip_patterns: loadJevSkipPatterns(),
-            instructions: loadJevInstructions(),
             ...extra,
           }),
         }
@@ -256,7 +247,7 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
     }
   };
   private togglePreview = async () => {
-    if (this.disabledReason) return;
+    if (this.previewDisabledReason) return;
     if (this.state.previewOpen) {
       this.setState({ previewOpen: false });
       return;
@@ -312,7 +303,9 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
     const reason = this.disabledReason;
     const { result } = this.state;
     const aiReason = this.aiDisabledReason;
-    const valid = !!result && isJevAnswerValid(result.confidence);
+    const previewReason = this.previewDisabledReason;
+    const valid =
+      !!result && isJevAnswerValid(result.confidence, this.props.validConfidence);
     const answerClass = (account: string) =>
       valid && account === result!.category
         ? "hints-category hints-valid"
@@ -346,9 +339,9 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
               <button
                 className="action-button"
                 onClick={this.togglePreview}
-                disabled={!!reason}
+                disabled={!!previewReason}
                 title={
-                  reason ||
+                  previewReason ||
                   "Preview the JEV request locally. No external request is sent."
                 }
               >

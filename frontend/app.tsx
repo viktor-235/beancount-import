@@ -339,6 +339,12 @@ class AppComponent
                           this.state.pending == null ? 0 : this.state.pending[1]
                         }
                         rulesPending={this.state.rules_pending || 0}
+                        aiPending={this.state.ai_pending || 0}
+                        jevEnabled={!!this.state.jev_enabled}
+                        jevSettingsError={this.state.jev_settings_error}
+                        // Unset only with invalid settings, when AI is disabled.
+                        jevValidConfidence={this.state.jev_valid_confidence ?? 1}
+                        jevRun={this.state.jev_run}
                         candidatesGeneration={this.state.candidates_generation!}
                         candidates={this.state.candidates!}
                         highlightPending={this.highlightPending}
@@ -412,9 +418,6 @@ class AppComponent
                 isOpen={this.state.settingsOpen}
                 onToggle={this.handleToggleSettings}
                 onSettingsChange={this.handleSettingsChange}
-                jevDefaultInstructions={
-                  this.state.jev_default_instructions || ""
-                }
               />
             </StatusBar>
           </AppRootElement>

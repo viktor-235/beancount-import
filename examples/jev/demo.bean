@@ -39,3 +39,11 @@ option "title" "Synthetic JEV review demo"
 2026-03-01 * "Transfer" "Savings side"
   Assets:Savings 100 USD
   Expenses:FIXME -100 USD
+
+2026-04-01 * "Bakery" "Bread and croissants"
+  Assets:Bank -9 USD
+  Expenses:FIXME 9 USD
+
+2026-04-02 * "Corner Grocer" "Weekly groceries"
+  Assets:Bank -43 USD
+  Expenses:FIXME 43 USD

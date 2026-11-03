@@ -421,6 +421,7 @@ def test_invalid_json_response(context, upstream, monkeypatch, body):
 def test_transport_errors_are_sanitized_without_retries(
     context, upstream, monkeypatch, error, status
 ):
+    fatal = isinstance(error, HTTPError) and error.code in (401, 402, 403, 429)
     calls = []
 
     def fail(*_a, **_kw):
@@ -431,6 +432,7 @@ def test_transport_errors_are_sanitized_without_retries(
     with pytest.raises(jev.JevError) as exc:
         jev.classify(context)
     assert exc.value.status == status
+    assert exc.value.fatal == fatal
     assert "private" not in str(exc.value) and "synthetic-key" not in str(exc.value)
     assert len(calls) == 1
 
@@ -445,7 +447,7 @@ def test_missing_key_never_calls_openrouter(context, monkeypatch, key):
     assert not jev.configured()
     with pytest.raises(jev.JevError) as exc:
         jev.classify(context)
-    assert exc.value.status == 503
+    assert exc.value.status == 503 and exc.value.fatal
 
 
 
@@ -503,24 +505,67 @@ def test_source_account_counted_only_as_counterpart(entries, selected):
     }
 
 
-def test_skip_patterns_search_transaction_lines():
+def _settings(tmp_path, text):
+    path = tmp_path / "settings.yaml"
+    path.write_text(text)
+    return jev.load_settings(str(path))
+
+
+def test_default_settings(tmp_path):
+    for settings in [jev.load_settings(None), _settings(tmp_path, ""),
+                     _settings(tmp_path, "jev:\nx-anchor: 1\n")]:
+        assert settings.skip_patterns == []
+        assert settings.valid_confidence == 0.9
+        assert settings.instructions is None
+        assert settings.is_category("Expenses:Coffee")
+        assert not settings.is_category("Expenses:FIXME")
+
+
+def test_settings_file(tmp_path):
+    settings = _settings(tmp_path, r"""
+jev:
+  account_filters:
+    exclude: ['^Expenses:Coffee$']
+  skip_transactions: ['^\s+Assets:Bank', 'Nothing']
+  valid_confidence: 57
+  prompt: "  Pick one.  "
+""")
+    assert not settings.is_category("Expenses:Coffee")
+    assert settings.is_category("Expenses:FIXME")  # exclude replaced
+    assert settings.is_category("Assets:Bank")  # include kept
+    assert settings.valid_confidence == 0.57 and 0.57 >= settings.valid_confidence
+    assert settings.instructions == "  Pick one.  "
     raw = '2026-01-06 * "Coffee+Bar" "Selected"\n  Assets:Bank -6 USD\n  Expenses:FIXME 6 USD'
-    jev.check_not_skipped(None, raw)
-    jev.check_not_skipped([], raw)
-    jev.check_not_skipped(["^Assets:Bank"], raw)  # indented posting line
-    with pytest.raises(jev.JevError) as exc:
-        jev.check_not_skipped(["Nothing", r"^\s+Assets:Bank"], raw)
-    assert exc.value.status == 422 and "Assets:Bank" in str(exc.value)
-    with pytest.raises(jev.JevError) as exc:
-        jev.check_not_skipped(["coffee\\+bar|Coffee\\+Bar"], raw)
-    assert exc.value.status == 422
+    assert jev.skip_match(settings, raw) == r"^\s+Assets:Bank"  # multiline
+    assert jev.skip_match(settings, raw.replace("Bank", "Cash")) is None
+    assert _settings(tmp_path, "jev:\n  prompt: ' '\n").instructions is None
 
 
-@pytest.mark.parametrize("patterns", ["^x", [1], ["("]])
-def test_invalid_skip_patterns(patterns):
-    with pytest.raises(jev.JevError) as exc:
-        jev.check_not_skipped(patterns, "raw")
-    assert exc.value.status == 400
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- jev",
+        "other: 1",
+        "jev: []",
+        "jev:\n  unknown: 1",
+        "jev:\n  account_filters: []",
+        "jev:\n  account_filters: {include: '^E'}",
+        "jev:\n  account_filters: {other: []}",
+        "jev:\n  account_filters: {include: ['(']}",
+        "jev:\n  skip_transactions: '^x'",
+        "jev:\n  skip_transactions: [1]",
+        "jev:\n  skip_transactions: ['(']",
+        "jev:\n  valid_confidence: 101",
+        "jev:\n  valid_confidence: -1",
+        "jev:\n  valid_confidence: true",
+        "jev:\n  valid_confidence: '90'",
+        "jev:\n  prompt: [x]",
+    ],
+)
+def test_invalid_settings(tmp_path, text):
+    with pytest.raises(ValueError) as exc:
+        _settings(tmp_path, text)
+    assert "settings.yaml" in str(exc.value)
 
 
 @pytest.mark.parametrize("instructions", [None, "", "   "])

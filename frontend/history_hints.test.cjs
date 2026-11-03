@@ -15,19 +15,11 @@ const mod = new Module(path.join(__dirname, "hints-test-bundle.cjs"), module);
 mod.filename = path.join(__dirname, "hints-test-bundle.cjs");
 mod.paths = module.paths;
 mod._compile(compiled.outputFiles[0].text, mod.filename);
-const { HistoryHintsComponent, percent } = mod.exports;
-const storage = new Map();
+const { HistoryHintsComponent } = mod.exports;
 global.window = {
   location: { pathname: "/" },
   clearTimeout,
   setTimeout,
-  addEventListener() {},
-  removeEventListener() {},
-  localStorage: {
-    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
-    setItem: (key, value) => storage.set(key, String(value)),
-    removeItem: (key) => storage.delete(key),
-  },
 };
 
 const fakeResult = {
@@ -69,7 +61,10 @@ function component(groups = [0]) {
     candidate,
     candidateIndex: 0,
     generation: 1,
-    configured: true,
+    jevEnabled: true,
+    jevSettingsError: null,
+    validConfidence: 0.9,
+    batchRunning: false,
     toolbar: null,
   });
   c.setState = (update, callback) => {
@@ -138,7 +133,7 @@ test("late reply after group/context change is discarded", async () => {
 });
 test("multiple groups require selection; no key and no groups never call JEV", async () => {
   for (const c of [component([0, 1]), component([]), component()]) {
-    if (c.state.group === 0) c.props = { ...c.props, configured: false };
+    if (c.state.group === 0) c.props = { ...c.props, jevEnabled: false };
     c.request = () => {
       throw Error("unexpected request");
     };
@@ -237,53 +232,54 @@ test("failed request is displayed without retry, and unmounted results are ignor
   await work;
   assert.equal(d.state.result, undefined);
 });
-test("probability formatting matches Fava", () => {
-  assert.equal(percent(0.75), "75%");
-  assert.equal(percent(0.000001), "<0.01%");
-  assert.equal(percent(0.0001), "0.01%");
+test("request bodies carry no JEV settings", async () => {
+  const c = component();
+  let body;
+  global.fetch = async (url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, json: async () => fakeResult };
+  };
+  try {
+    await c.classify();
+  } finally {
+    delete global.fetch;
+  }
+  assert.deepEqual(Object.keys(body).sort(), [
+    "candidate_index",
+    "generation",
+    "group_number",
+    "token",
+  ]);
+  assert.deepEqual(c.state.result, fakeResult);
 });
-test("skip patterns disable AI classification but not the preview", async () => {
+test("server skip match disables AI classification but not the preview", async () => {
   const c = component();
   const operations = [];
   c.request = async (operation) => {
     operations.push(operation);
     return { request: { state: {} } };
   };
-  storage.set("jevSkipTransactions", JSON.stringify(["(", "^\\s+Assets:Bank"]));
-  try {
-    assert.match(c.aiDisabledReason, /Assets:Bank/);
-    await c.classify();
-    assert.deepEqual(operations, []);
-    await c.togglePreview();
-    assert.deepEqual(operations, ["hints/request"]);
-    storage.set("jevSkipTransactions", JSON.stringify(["^Assets:Bank"]));
-    assert.equal(c.aiDisabledReason, "");
-  } finally {
-    storage.delete("jevSkipTransactions");
-  }
+  c.props.candidate.hints.skip_pattern = "^\\s+Assets:Bank";
+  assert.match(c.aiDisabledReason, /Assets:Bank/);
+  await c.classify();
+  assert.deepEqual(operations, []);
+  await c.togglePreview();
+  assert.deepEqual(operations, ["hints/request"]);
+  c.props.candidate.hints.skip_pattern = null;
+  assert.equal(c.aiDisabledReason, "");
 });
-test("answers at or above the valid confidence are marked valid", () => {
-  const settings = esbuild.buildSync({
-    entryPoints: [path.join(__dirname, "jev_settings.ts")],
-    platform: "node",
-    format: "cjs",
-    write: false,
-  });
-  const settingsModule = new Module(path.join(__dirname, "jev-settings-test.cjs"), module);
-  settingsModule._compile(settings.outputFiles[0].text, settingsModule.id);
-  const { isJevAnswerValid, loadJevValidConfidencePercent } =
-    settingsModule.exports;
-  assert.equal(loadJevValidConfidencePercent(), 90);
-  assert.equal(isJevAnswerValid(0.9), true);
-  assert.equal(isJevAnswerValid(0.89), false);
-  storage.set("jevValidConfidence", "75");
-  try {
-    assert.equal(isJevAnswerValid(0.8), true);
-    storage.set("jevValidConfidence", "57");
-    assert.equal(isJevAnswerValid(0.57), true);
-    storage.set("jevValidConfidence", "abc");
-    assert.equal(loadJevValidConfidencePercent(), 90);
-  } finally {
-    storage.delete("jevValidConfidence");
-  }
+test("invalid settings disable AI and the preview; a batch run disables AI", async () => {
+  const c = component();
+  c.request = () => {
+    throw Error("unexpected request");
+  };
+  c.props = { ...c.props, jevSettingsError: "settings.yaml: broken" };
+  assert.match(c.aiDisabledReason, /settings.yaml: broken/);
+  await c.classify();
+  await c.togglePreview();
+  assert.equal(c.state.previewOpen, false);
+  c.props = { ...c.props, jevSettingsError: null, batchRunning: true };
+  assert.match(c.aiDisabledReason, /batch/);
+  await c.classify();
+  assert.equal(c.state.aiOpen, false);
 });

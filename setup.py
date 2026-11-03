@@ -180,6 +180,7 @@ setuptools.setup(
         'watchdog',
         'typing_extensions',
         'cachetools',
+        'pyyaml',
     ],
     extras_require={
         'rules': ['fava'],

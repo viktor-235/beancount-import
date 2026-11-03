@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -75,13 +76,13 @@ def test_history_search_and_exact_payee_context(loaded):
     assert fixme["count"] == 2  # past unclear bookings stay visible
     assert hints.summarize(entries, "split")["transaction_count"] == 1
     assert hints.summarize(entries, "one")["transaction_count"] == 0  # current source excluded
-    assert hints.summarize(entries, "")["transaction_count"] == 6
+    assert hints.summarize(entries, "")["transaction_count"] == 8
     ctx = hints.build_context(loaded.editor, candidate, 0)
     assert {a: h["count"] for a, h in ctx["payee_history"].items()} == {"Expenses:Coffee": 1, "Expenses:Groceries": 1}
     assert ctx["categories"]["Expenses:Coffee"]["note"] == "Coffee and snacks."
     assert "Expenses:Unused" in ctx["categories"]
     ctx = hints.build_context(loaded.editor, candidate, 0,
-                              {"include": ["^Expenses:"], "exclude": ["Unused"]})
+                              jev.account_filter({"include": ["^Expenses:"], "exclude": ["Unused"]}))
     assert "Expenses:Unused" not in ctx["categories"]
     assert not any(a.startswith("Income:") for a in ctx["categories"])
 
@@ -125,6 +126,7 @@ class TestHintsHTTP(tornado.testing.AsyncHTTPTestCase):
             (r"/secret/change_candidate", webserver.ChangeCandidateHandler),
         ])
         app.next_candidates = self.candidates
+        app.jev_running = lambda: False
         app.current_state = {"candidates_generation": 7}
         app.reconciler = SimpleNamespace(loaded_future=SimpleNamespace(result=lambda: self.loaded))
         app.set_state_force = lambda **kwargs: None
@@ -162,22 +164,46 @@ class TestHintsHTTP(tornado.testing.AsyncHTTPTestCase):
             assert fake.call_count == 1
         assert path.read_bytes() == before
 
+    def set_settings(self, **jev_settings):
+        self.loaded.jev_settings = jev.load_settings(None)._replace(**jev_settings)
+
     def test_skip_patterns_block_classify_only(self):
+        self.set_settings(skip_patterns=[re.compile("Nothing"), re.compile(r"^\s+Assets:Bank", re.M)])
         with patch.object(jev, "classify", side_effect=AssertionError("Unexpected external request")):
-            skipped = self.post("hints/classify", skip_patterns=["Nothing", r"^\s+Assets:Bank"])
+            skipped = self.post("hints/classify")
             assert skipped.code == 422
             assert "Assets:Bank" in json.loads(skipped.body)["error"]
-            assert self.post("hints/classify", skip_patterns=["("]).code == 400
-            assert self.post("hints/request", skip_patterns=[r"^\s+Assets:Bank"]).code == 200
+            assert self.post("hints/request").code == 200
+        self.set_settings(skip_patterns=[re.compile("^Assets:Bank", re.M)])
         with patch.object(jev, "classify", return_value={"category": "Expenses:Coffee", "confidence": .8}):
-            assert self.post("hints/classify", skip_patterns=["^Assets:Bank"]).code == 200
+            assert self.post("hints/classify").code == 200
 
-    def test_custom_instructions_reach_preview_and_classify(self):
-        preview = json.loads(self.post("hints/request", instructions="Custom prompt").body)
+    def test_settings_reach_preview_and_classify_not_request_body(self):
+        self.set_settings(instructions="Custom prompt", is_category=jev.account_filter(
+            {"include": ["^Expenses:Coffee$"], "exclude": []}))
+        preview = json.loads(self.post("hints/request", instructions="Ignored",
+                                       account_filters={"include": [], "exclude": []}).body)
         assert preview["request"]["questions"]["category"]["instructions"] == "Custom prompt"
+        assert list(preview["request"]["questions"]["category"]["criteria"]) == ["Expenses:Coffee"]
         with patch.object(jev, "classify", return_value={"category": "Expenses:Coffee", "confidence": .8}) as fake:
-            assert self.post("hints/classify", instructions="Custom prompt").code == 200
+            assert self.post("hints/classify", skip_patterns=["."]).code == 200
             assert fake.call_args.kwargs["instructions"] == "Custom prompt"
+
+    def test_invalid_settings_disable_ai_but_not_history(self):
+        self.loaded.jev_settings = None
+        self.loaded.jev_settings_error = "settings.yaml: broken"
+        with patch.object(jev, "classify", side_effect=AssertionError("Unexpected external request")):
+            for operation in ("hints/request", "hints/classify"):
+                response = self.post(operation)
+                assert response.code == 503
+                assert "settings.yaml: broken" in json.loads(response.body)["error"]
+            assert self.post("hints/history", query="coffee").code == 200
+
+    def test_batch_run_blocks_classify_and_apply(self):
+        self._app.jev_running = lambda: True
+        with patch.object(jev, "classify", side_effect=AssertionError("Unexpected external request")):
+            assert self.post("hints/classify").code == 409
+            assert self.post("change_candidate", hint_token=self.msg["token"], changes={}).code == 409
 
     def test_apply_group_and_stale_guard(self):
         index = self.msg["candidate_index"]
@@ -251,3 +277,14 @@ def test_target_direction():
     assert hints._direction([posting("5"), posting("-1")]) is None
     assert hints._direction([posting(None)]) is None
     assert hints._direction([]) is None
+
+
+def test_candidate_state_carries_skip_match(loaded):
+    candidate = candidates_for(loaded, "Single purchase").candidates[-1]
+    assert candidate.jev_settings is loaded.jev_settings
+    assert webserver.json_encode_candidate(candidate)["hints"]["skip_pattern"] is None
+    candidate.jev_settings = candidate.jev_settings._replace(
+        skip_patterns=[re.compile("^  demo_id", re.M)])
+    assert webserver.json_encode_candidate(candidate)["hints"]["skip_pattern"] == "^  demo_id"
+    candidate.jev_settings = None
+    assert webserver.json_encode_candidate(candidate)["hints"]["skip_pattern"] is None

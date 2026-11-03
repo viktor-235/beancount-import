@@ -9,6 +9,9 @@ transaction. It adds two tools to the candidate review page:
 - **AI classification (optional).** An on-demand request to the
   [JEV](https://openrouter.ai/~typesafe/jev-latest) decision model on OpenRouter. The model suggests
   an account from your ledger together with a confidence score.
+- **Import rules and batch accept.** Rules categorize imported transactions;
+  Accept rules, Accept with AI and Accept rules + AI confirm many pending
+  transactions at once.
 
 Everything else is upstream beancount-import: the data sources, the matching,
 the built-in classifier and the Confirm workflow. The fork is a drop-in
@@ -57,6 +60,9 @@ Full diff against upstream:
   confidence threshold are shown in bold. Click an account to apply it.
 - An answer is discarded when the candidate changes, so a late reply never
   lands on the wrong transaction.
+- Classify with AI and Show request are disabled while the settings file is
+  invalid. Classify with AI is also disabled for a transaction matched by
+  `skip_transactions`.
 
 ### Import rules
 
@@ -112,18 +118,69 @@ rules:
 - The transactions are written exactly like a manual Confirm, without AI
   requests.
 
-### Settings
+### Accept with AI
 
-![JEV settings](docs/images/settings.png)
+- **Accept with AI (N)** classifies pending transactions with JEV and confirms
+  every answer whose confidence is at least `valid_confidence`. A transaction
+  qualifies if it has exactly one unknown posting group, matches no other
+  transaction (as for Accept rules) and is not matched by `skip_transactions`.
+  Journal transactions with `Expenses:FIXME` qualify too. N is the number of
+  transactions that will be sent.
+- **Accept rules + AI (N)** goes through the transactions in the order of the
+  Pending list and confirms each one by rules if they fully categorize it,
+  otherwise with AI, so `categorizer: "rules"` and `categorizer: "jev"`
+  transactions are confirmed in that order. N is the sum of both; a transaction that
+  rules changed but left with an unknown account goes to AI with the rules'
+  changes.
+- Before any request, a dialog states how many transactions go to OpenRouter;
+  each is a separate paid request.
+- Requests run one at a time on the server, and each confident answer is
+  confirmed right away. The pressed button shows **Stop (i/N)**; stopping
+  waits for the current request. Confirm, Skip, Classify and the other batch
+  buttons are disabled meanwhile. Progress survives a page reload.
+- Answers below the threshold leave the transaction pending and unchanged.
+  Nothing is cached: pressing the button again sends them again.
+- An invalid API key, missing credits or a rate limit stops the run. A timeout
+  or an invalid answer skips the transaction; three such errors in a row stop
+  the run. The status bar shows the result: accepted X of N (R of them by
+  rules, for Accept rules + AI), Y below the threshold, Z errors, S skipped.
+- A confirmed posting gets metadata, so AI bookings can be found and reviewed
+  later. Clicking a suggestion of Classify with AI adds none.
 
-The settings are stored per browser (`localStorage`) and sent with each request.
+  ```beancount
+  Expenses:Groceries  9 USD
+    categorizer: "jev"
+    jev_confidence: 0.95
+    jev_account: "Expenses:Groceries"
+  ```
 
-| Setting | Default | Purpose |
+### Settings file
+
+`--settings PATH` (or `settings=` in a launcher) reads JEV settings from the
+`jev:` key of a YAML file. Without it, the defaults below are used. The server
+only reads the file; edit it by hand. Top-level keys starting with `x-` are
+ignored, other keys are errors.
+
+```yaml
+jev:
+  account_filters:
+    include: ['^(Expenses|Income):', '^(Assets|Liabilities):']
+    exclude: ['^Expenses:Unknown$', '^Income:Unknown$', '^Expenses:FIXME$', ':Unattributed']
+  skip_transactions: []
+  valid_confidence: 90
+  prompt: null
+```
+
+| Key | Default | Purpose |
 |---|---|---|
-| JEV Accounts: Include / Exclude | include `^(Expenses\|Income):`, `^(Assets\|Liabilities):`; exclude `Expenses:Unknown`, `Income:Unknown`, `Expenses:FIXME`, `:Unattributed` | Regular expressions (one per line, Python `re.search`) selecting the accounts offered to JEV |
-| JEV: Skip Transactions | empty | Regular expressions on the transaction text. On a match, AI is disabled for that transaction and the server rejects it too |
-| JEV: Valid Confidence, % | 90 | Threshold for marking an answer as valid |
-| JEV: Prompt | built-in | Instructions sent to the model. Clear the field to return to the default |
+| `account_filters` | as above | Regular expressions (Python `re.search`) selecting the accounts offered to JEV: an account matching any `include` and no `exclude` pattern. A missing list keeps its default |
+| `skip_transactions` | empty | Regular expressions searched in the transaction text sent to JEV (`^` and `$` match at line boundaries). Matching transactions are never sent |
+| `valid_confidence` | 90 | Percent. Answers at or above it are shown in bold and confirmed by Accept with AI |
+| `prompt` | `null` (built-in) | Instructions sent to the model |
+
+- The file is reloaded with the journal, like the import rules.
+- On an error, all AI features are disabled and the error is listed in the UI.
+  Accept rules keeps working.
 
 ## Installation
 
@@ -142,16 +199,19 @@ export OPENROUTER_API_KEY=sk-or-...
 export JEV_MODEL=~typesafe/jev-latest   # optional, this is the default
 ```
 
-Without a key, payee history and Show request still work. The AI button is
+Without a key, payee history and Show request still work. The AI buttons are
 disabled.
 
 ## Privacy
 
-Data leaves your machine **only** when you press Classify with AI. Each request
-sends the transaction text and metadata, account names and notes, and payee
-history (counts and narrations) to OpenRouter. The server does not log or store
-requests or answers. Use Skip Transactions to keep particular accounts or
-payees away from AI completely.
+Data leaves your machine **only** when you press Classify with AI or confirm
+the dialog of Accept with AI or Accept rules + AI. A batch sends one request
+per transaction, N in total. Each request sends the transaction text and
+metadata, account names and notes, and payee history (counts and narrations)
+to OpenRouter. The server does not log or store requests or answers; only the
+confirmed account and confidence are written to the journal as metadata. Use
+`skip_transactions` to keep particular accounts or payees away from AI
+completely.
 
 The OpenRouter decisions endpoint is in alpha and may change. Confidence is the
 model's own estimate, not a guarantee.
@@ -172,11 +232,12 @@ Then open http://127.0.0.1:8106/. See [examples/jev/README.md](examples/jev/READ
 |---|---|
 | Backend | New `beancount_import/history_hints.py` (candidate snapshot, history search) and `beancount_import/jev.py` (request building, OpenRouter client) |
 | Backend | `webserver.py`: `/hints/{history,request,classify}` endpoints, a stale-candidate guard on `change_candidate`, and JEV state in the initial state |
+| Backend | JEV settings file (`--settings`, `jev.load_settings`); Accept with AI: `reconcile.py` selects and accepts transactions, `webserver.py` adds `/jev_batch`, `/jev_batch_stop`, the background run and the `ai_pending`/`jev_run` state |
 | Backend | `journal_editor.py`: keeps the plugin-processed entries for history |
 | Backend | New `beancount_import/import_rules.py`; `reconcile.py` applies the rules to pending transactions and adds Accept rules; `webserver.py` adds `--import_rules`, the `/accept_rules` endpoint and the `rules_pending` count in the state |
-| Frontend | New `history_hints.tsx` and `jev_settings.ts`. Changes to `candidates.tsx` (panel, `c` shortcut), `settings.tsx` (JEV settings) and `styles.css` |
-| Tests | `jev_test.py`, `history_hints_test.py`, `accept_rules_test.py`, `import_rules_test.py` and `frontend/history_hints.test.cjs` (`npm test`) |
-| Packaging | `python_requires >= 3.10`. Optional `rules` extra with fava. CI also runs `npm test`. PyPI publishing is removed (the fork is not published to PyPI) |
+| Frontend | New `history_hints.tsx` and `jev_batch.ts`. Changes to `candidates.tsx` (panel, `c` shortcut, batch buttons) and `styles.css` |
+| Tests | `jev_test.py`, `jev_batch_test.py`, `history_hints_test.py`, `accept_rules_test.py`, `import_rules_test.py`, `frontend/history_hints.test.cjs` and `frontend/jev_batch.test.cjs` (`npm test`) |
+| Packaging | `python_requires >= 3.10`. Requires PyYAML. Optional `rules` extra with fava. CI also runs `npm test`. PyPI publishing is removed (the fork is not published to PyPI) |
 
 The source adapters, matching rules and the built-in classifier are unchanged.
 

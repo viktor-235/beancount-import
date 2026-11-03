@@ -9,8 +9,17 @@ import {
   BeancountTransaction,
   TransactionProperties,
   executeServerCommand,
-  BeancountEntry
+  BeancountEntry,
+  JevRun
 } from "./server_connection";
+import {
+  JevBatchMode,
+  JevBatchStatus,
+  batchConfirmText,
+  batchDisabledReason,
+  batchLabel,
+  isBatchRunning
+} from "./jev_batch";
 import { HistoryHintsComponent } from "./history_hints";
 import { AccountInputComponent } from "./account_input";
 import { UsedTransactionsComponent } from "./used_transactions";
@@ -81,6 +90,11 @@ interface CandidatesComponentProps {
   pendingIndex: number;
   numPending: number;
   rulesPending: number;
+  aiPending: number;
+  jevEnabled: boolean;
+  jevSettingsError?: string | null;
+  jevValidConfidence: number;
+  jevRun?: JevRun | null;
   accounts: string[];
   associatedDataViewController: AssociatedDataViewController;
   candidateSelectionState: CandidateSelectionState;
@@ -180,7 +194,7 @@ export class CandidatesComponent extends React.PureComponent<
     candidateIndex: number,
     spec: { groupNumber?: number; fieldNumber?: number }
   ) => {
-    if (this.state.inputState !== undefined) {
+    if (this.state.inputState !== undefined || isBatchRunning(this.props.jevRun)) {
       return;
     }
     const candidate = this.props.candidates.candidates[candidateIndex];
@@ -270,12 +284,13 @@ export class CandidatesComponent extends React.PureComponent<
   };
 
   private changeSelectedCandidateAllAccounts = () => {
+    if (isBatchRunning(this.props.jevRun)) return;
     this.requestChangeAccount(this.state.selectedCandidateIndex, {});
   };
 
   private fixme = () => {
     const { inputState } = this.state;
-    if (inputState !== undefined) {
+    if (inputState !== undefined || isBatchRunning(this.props.jevRun)) {
       return;
     }
     const candidate = this.selectedCandidate;
@@ -315,6 +330,7 @@ export class CandidatesComponent extends React.PureComponent<
       selectedCandidate !== undefined &&
       selectedCandidate.substituted_accounts.length > 0;
     const { numPending, pendingIndex } = this.props;
+    const batchRunning = isBatchRunning(this.props.jevRun);
     let accountInputComponent: any;
 
     if (inputState !== undefined) {
@@ -355,7 +371,7 @@ export class CandidatesComponent extends React.PureComponent<
         <div className="action-button-wrapper hints-toolbar-wrapper">
           <div className="action-button__group">
             <button
-              disabled={pendingIndex == 0}
+              disabled={pendingIndex == 0 || batchRunning}
               onClick={this.skipToFirst}
               title="Skip to first pending entry"
               className="action-button"
@@ -363,7 +379,7 @@ export class CandidatesComponent extends React.PureComponent<
               First
             </button>
             <button
-              disabled={pendingIndex == 0}
+              disabled={pendingIndex == 0 || batchRunning}
               onClick={this.skipToPrior}
               title="Skip to previous pending entry, keyboard shortcut: ["
               className="action-button"
@@ -371,7 +387,7 @@ export class CandidatesComponent extends React.PureComponent<
               Previous
             </button>
             <button
-              disabled={pendingIndex + 1 >= numPending}
+              disabled={pendingIndex + 1 >= numPending || batchRunning}
               onClick={this.skipToNext}
               title="Skip to next pending entry, keyboard shortcut: ]"
               className="action-button"
@@ -379,7 +395,7 @@ export class CandidatesComponent extends React.PureComponent<
               Next
             </button>
             <button
-              disabled={pendingIndex + 1 >= numPending}
+              disabled={pendingIndex + 1 >= numPending || batchRunning}
               onClick={this.skipToNext}
               title="Skip to last pending entry"
               className="action-button"
@@ -389,7 +405,7 @@ export class CandidatesComponent extends React.PureComponent<
           </div>
           <div className="action-button__group">
             <button
-              disabled={!hasAccountSubstitutions}
+              disabled={!hasAccountSubstitutions || batchRunning}
               onClick={this.changeSelectedCandidateAllAccounts}
               title="Change all unknown accounts to the same value, keyboard shortcut: a"
               className="action-button"
@@ -397,7 +413,7 @@ export class CandidatesComponent extends React.PureComponent<
               Account
             </button>
             <button
-              disabled={!hasAccountSubstitutions}
+              disabled={!hasAccountSubstitutions || batchRunning}
               onClick={this.fixme}
               title="Reset all unknown accounts of the selected candidate to FIXME accounts, keyboard shortcut: f"
               className="action-button"
@@ -447,6 +463,7 @@ export class CandidatesComponent extends React.PureComponent<
           </div>
           <div className="action-button__group">
           <button
+              disabled={batchRunning}
               onClick={this.handleConfirm}
               title="Confirm selected candidate, keyboard shortcut: enter"
               className="action-button"
@@ -455,7 +472,8 @@ export class CandidatesComponent extends React.PureComponent<
             </button>
             <button
               disabled={
-                selectedCandidate.original_transaction_properties == null
+                selectedCandidate.original_transaction_properties == null ||
+                batchRunning
               }
               onClick={this.handleRevert}
               title="Revert changes to selected candidate"
@@ -464,6 +482,7 @@ export class CandidatesComponent extends React.PureComponent<
               Revert
             </button>
             <button
+              disabled={batchRunning}
               onClick={this.handleIgnore}
               title="Add the selected candidate to the ignore file, keyboard shortcut: i"
               className="action-button"
@@ -473,6 +492,7 @@ export class CandidatesComponent extends React.PureComponent<
           </div>
           <div className="action-button__group">
             <button
+              disabled={batchRunning}
               onClick={this.retrain}
               title="Retrain classifier, keyboard shortcut: t"
               className="action-button"
@@ -482,13 +502,25 @@ export class CandidatesComponent extends React.PureComponent<
           </div>
           <div className="action-button__group">
             <button
-              disabled={this.props.rulesPending === 0 || this.state.acceptingRules}
+              disabled={
+                this.props.rulesPending === 0 ||
+                this.state.acceptingRules ||
+                batchRunning
+              }
               onClick={this.handleAcceptRules}
               title="Confirm every pending transaction fully categorized by import rules (categorizer: rules) that matches no other transaction"
               className="action-button"
             >
               Accept rules ({this.props.rulesPending})
             </button>
+            {this.renderBatchButton(
+              "ai",
+              "Classify every pending transaction with one unknown posting group that matches no other transaction with JEV, one paid request each, and confirm the confident answers"
+            )}
+            {this.renderBatchButton(
+              "rules_ai",
+              "Accept rules, then Accept with AI"
+            )}
           </div>
           <div className="action-button__group" ref={this.setHintsToolbar} />
         </div>
@@ -543,7 +575,10 @@ export class CandidatesComponent extends React.PureComponent<
             candidate={selectedCandidate}
             candidateIndex={this.state.selectedCandidateIndex}
             generation={this.props.candidatesGeneration}
-            configured={!!this.props.serverConnection.state.jev_configured}
+            jevEnabled={this.props.jevEnabled}
+            jevSettingsError={this.props.jevSettingsError}
+            validConfidence={this.props.jevValidConfidence}
+            batchRunning={batchRunning}
             toolbar={this.state.hintsToolbar}
           />}
         </CandidateListElement>
@@ -585,6 +620,7 @@ export class CandidatesComponent extends React.PureComponent<
 
   private handleKeyDown = (event: KeyboardEvent) => {
     if (
+      isBatchRunning(this.props.jevRun) ||
       event.target instanceof HTMLInputElement ||
       event.target instanceof HTMLTextAreaElement ||
       event.target instanceof HTMLButtonElement
@@ -712,6 +748,7 @@ export class CandidatesComponent extends React.PureComponent<
     candidateIndex: number,
     { showInEditor = false, ignore = false } = {}
   ) => {
+    if (isBatchRunning(this.props.jevRun)) return Promise.resolve([]);
     const promise = executeServerCommand("select_candidate", {
       index: candidateIndex,
       generation: this.props.candidatesGeneration,
@@ -767,6 +804,7 @@ export class CandidatesComponent extends React.PureComponent<
   };
 
   private handleRevert = () => {
+    if (isBatchRunning(this.props.jevRun)) return;
     const candidateIndex = this.state.selectedCandidateIndex;
     const candidate = this.props.candidates.candidates[candidateIndex];
     const transaction = candidate.new_entries[0] as BeancountTransaction;
@@ -807,6 +845,52 @@ export class CandidatesComponent extends React.PureComponent<
   private handleConfirm = () => {
     this.acceptCandidate(this.state.selectedCandidateIndex);
   };
+  private get batchStatus(): JevBatchStatus {
+    return {
+      rulesPending: this.props.rulesPending,
+      aiPending: this.props.aiPending,
+      jevEnabled: this.props.jevEnabled,
+      jevSettingsError: this.props.jevSettingsError,
+      run: this.props.jevRun
+    };
+  }
+
+  private renderBatchButton(mode: JevBatchMode, title: string) {
+    const status = this.batchStatus;
+    const reason = batchDisabledReason(mode, status);
+    return (
+      <button
+        disabled={!!reason}
+        onClick={() => this.handleJevBatch(mode)}
+        title={reason || title}
+        className="action-button"
+      >
+        {batchLabel(mode, status)}
+      </button>
+    );
+  }
+
+  private handleJevBatch = (mode: JevBatchMode) => {
+    const { aiPending, jevRun, jevValidConfidence } = this.props;
+    if (isBatchRunning(jevRun)) {
+      executeServerCommand("jev_batch_stop", null);
+      return;
+    }
+    // Data leaves the machine only after this confirmation.
+    if (
+      aiPending > 0 &&
+      !window.confirm(batchConfirmText(aiPending, jevValidConfidence))
+    )
+      return;
+    // The server refuses the run if it would send more than was confirmed.
+    executeServerCommand("jev_batch", { mode, n: aiPending }).then(
+      (result) => {
+        if (result && result.error) window.alert(result.error);
+      },
+      (error) => window.alert(`Could not start the AI run: ${error}`)
+    );
+  };
+
   private handleAcceptRules = () => {
     this.setState({ acceptingRules: true });
     const done = () => this.setState({ acceptingRules: false });

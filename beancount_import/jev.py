@@ -8,10 +8,11 @@ import os
 import re
 from collections import Counter, defaultdict
 from http.client import HTTPException
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import yaml
 from beancount.core import data
 
 ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -20,7 +21,7 @@ TIMEOUT = 30
 # Per account in `payee_history`: most frequent distinct narrations, shortened.
 HISTORY_NARRATIONS = 5
 HISTORY_NARRATION_LENGTH = 100
-# Used when the browser sends no custom instructions (Settings → JEV: Prompt).
+# Used when the settings file has no `prompt`.
 DEFAULT_INSTRUCTIONS = (
     "Which account should `target_group.postings` in `transaction` be booked to? "
     "`target_group.direction` tells whether money went out or came in; money in "
@@ -29,20 +30,97 @@ DEFAULT_INSTRUCTIONS = (
     "`payee_history` is this payee's past bookings per account with their "
     "narrations; the meaning of the transaction outweighs it."
 )
-# Keep in sync with frontend/jev_settings.ts.
 DEFAULT_ACCOUNT_FILTERS = {
     "include": [r"^(Expenses|Income):", r"^(Assets|Liabilities):"],
     "exclude": [r"^Expenses:Unknown$", r"^Income:Unknown$", r"^Expenses:FIXME$",
                 r":Unattributed"],
 }
+DEFAULT_VALID_CONFIDENCE = 90  # percent
+SETTINGS_KEYS = ("account_filters", "skip_transactions", "valid_confidence", "prompt")
 
 
 class JevError(Exception):
-    """An error whose message is safe to show in the browser."""
+    """An error whose message is safe to show in the browser.
 
-    def __init__(self, message: str, status: int = 502):
+    `fatal`: retrying other transactions is pointless (bad key, no credits,
+    rate limit), so a batch run stops.
+    """
+
+    def __init__(self, message: str, status: int = 502, fatal: bool = False):
         super().__init__(message)
         self.status = status
+        self.fatal = fatal
+
+
+class JevSettings(NamedTuple):
+    is_category: Callable[[str], bool]
+    skip_patterns: list[re.Pattern]
+    valid_confidence: float  # 0..1
+    instructions: str | None  # None: DEFAULT_INSTRUCTIONS
+
+
+def load_settings(path: str | None) -> JevSettings:
+    """Reads the `jev:` section of the settings file; defaults without a file.
+
+    Raises ValueError with a message naming the file on any invalid value.
+    """
+    config: Any = {}
+    if path is not None:
+        with open(path, encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        if not isinstance(config, dict):
+            raise ValueError(f"{path}: expected a mapping")
+        unknown = [k for k in config if k != "jev" and not str(k).startswith("x-")]
+        if unknown:
+            raise ValueError(f"{path}: unknown top-level keys {unknown}")
+        config = config.get("jev")
+        if config is None:
+            config = {}
+        elif not isinstance(config, dict):
+            raise ValueError(f"{path}: jev: expected a mapping")
+        unknown = [k for k in config if k not in SETTINGS_KEYS]
+        if unknown:
+            raise ValueError(f"{path}: jev: unknown keys {unknown}, expected "
+                             f"{', '.join(SETTINGS_KEYS)}")
+
+    filters = config.get("account_filters")
+    if filters is not None:
+        if not isinstance(filters, dict) or set(filters) - {"include", "exclude"}:
+            raise ValueError(f"{path}: jev.account_filters: expected include "
+                             "and exclude lists")
+        filters = {**DEFAULT_ACCOUNT_FILTERS, **filters}
+    try:
+        is_category = account_filter(filters)
+    except JevError as exc:
+        raise ValueError(f"{path}: jev.account_filters: {exc}") from None
+
+    skip = config.get("skip_transactions") or []
+    if not isinstance(skip, list) or not all(isinstance(p, str) for p in skip):
+        raise ValueError(f"{path}: jev.skip_transactions: expected a list of "
+                         "regular expressions")
+    try:
+        skip_patterns = [re.compile(p, re.MULTILINE) for p in skip]
+    except re.error as exc:
+        raise ValueError(f"{path}: jev.skip_transactions: invalid pattern "
+                         f"{exc.pattern!r}: {exc}") from None
+
+    percent = config.get("valid_confidence", DEFAULT_VALID_CONFIDENCE)
+    if (isinstance(percent, bool) or not isinstance(percent, int | float)
+            or not 0 <= percent <= 100):
+        raise ValueError(f"{path}: jev.valid_confidence: expected a percent "
+                         "from 0 to 100")
+
+    prompt = config.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        raise ValueError(f"{path}: jev.prompt: expected a string or null")
+    return JevSettings(is_category, skip_patterns, percent / 100,
+                       prompt if prompt and prompt.strip() else None)
+
+
+def skip_match(settings: JevSettings, transaction: str) -> str | None:
+    """The first skip pattern found in the transaction text sent to JEV."""
+    return next((p.pattern for p in settings.skip_patterns
+                 if p.search(transaction)), None)
 
 
 def configured() -> bool:
@@ -69,21 +147,6 @@ def account_filter(filters: Any = None) -> Callable[[str], bool]:
     return lambda account: any(
         p.search(account) for p in compiled["include"]
     ) and not any(p.search(account) for p in compiled["exclude"])
-
-
-def check_not_skipped(patterns: Any, transaction: str) -> None:
-    """Reject a transaction matched by a skip pattern (multiline search)."""
-    if patterns is None:
-        return
-    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
-        raise JevError("Invalid JEV skip patterns.", 400)
-    for pattern in patterns:
-        try:
-            matched = re.search(pattern, transaction, re.MULTILINE)
-        except re.error:
-            raise JevError(f"Invalid JEV skip pattern: {pattern!r}.", 400)
-        if matched:
-            raise JevError(f"Skipped for AI by the settings pattern {pattern}", 422)
 
 
 def build_context(
@@ -221,7 +284,8 @@ def classify(
 ) -> dict[str, Any]:
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not key:
-        raise JevError("Set OPENROUTER_API_KEY on the importer server to enable JEV.", 503)
+        raise JevError("Set OPENROUTER_API_KEY on the importer server to enable JEV.",
+                       503, fatal=True)
     payload = build_request(context, model, instructions)
     req = Request(
         ENDPOINT,
@@ -246,11 +310,11 @@ def classify(
             message = "OpenRouter has insufficient credits. Check your account balance."
         elif exc.code == 429:
             raise JevError(
-                "OpenRouter rate limit reached. Try again later.", 429
+                "OpenRouter rate limit reached. Try again later.", 429, fatal=True
             ) from None
         else:
             message = "OpenRouter could not classify the transaction. Try again later."
-        raise JevError(message) from None
+        raise JevError(message, fatal=exc.code in (401, 402, 403)) from None
     except TimeoutError:
         raise JevError("JEV request timed out. Try again.", 504) from None
     except URLError as exc:

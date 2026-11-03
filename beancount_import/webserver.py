@@ -156,8 +156,13 @@ def json_encode_candidate(obj: reconcile.Candidate):
     change_sets, _, _ = obj.staged_changes_with_unique_account_names.get_diff()
     _, _, new_entries = obj.staged_changes.get_diff()
     snapshot = history_hints.candidate_snapshot(obj)
+    hints = None
+    if snapshot:
+        hints = snapshot[1]
+        hints['skip_pattern'] = obj.jev_settings and jev.skip_match(
+            obj.jev_settings, hints['transaction'])
     return dict(
-        hints=snapshot[1] if snapshot else None,
+        hints=hints,
         change_sets=change_sets,
         used_transaction_ids=obj.used_transaction_ids,
         substituted_accounts=obj.substituted_accounts or [],
@@ -257,6 +262,9 @@ class GetDataHandler(tornado.web.RequestHandler):
             return self.finish('Error writing data')
 
 
+BATCH_RUNNING = "An AI batch run is in progress."
+
+
 def get_hint_candidate(application, msg):
     candidates = application.next_candidates
     index = msg.get('candidate_index')
@@ -285,7 +293,9 @@ class HistoryHintsHandler(tornado.web.RequestHandler):
             if not isinstance(msg, dict):
                 raise jev.JevError("Invalid request.", 400)
             candidate = get_hint_candidate(self.application, msg)
-            editor = self.application.reconciler.loaded_future.result().editor
+            loaded = self.application.reconciler.loaded_future.result()
+            editor = loaded.editor
+            settings = loaded.jev_settings
             if operation == 'history':
                 query = msg.get('query', '')
                 if not isinstance(query, str):
@@ -293,13 +303,21 @@ class HistoryHintsHandler(tornado.web.RequestHandler):
                 result = history_hints.summarize(
                     history_hints.history_entries(editor, candidate), query)
             else:
+                if settings is None:
+                    raise jev.JevError(
+                        "JEV disabled: %s" % loaded.jev_settings_error, 503)
                 context = history_hints.build_context(
-                    editor, candidate, msg.get('group_number'), msg.get('account_filters'))
-                instructions = msg.get('instructions')
+                    editor, candidate, msg.get('group_number'), settings.is_category)
+                instructions = settings.instructions
                 if operation == 'request':
                     result = {'request': jev.build_request(context, instructions=instructions)}
                 else:
-                    jev.check_not_skipped(msg.get('skip_patterns'), context['transaction'])
+                    if self.application.jev_running():
+                        raise jev.JevError(BATCH_RUNNING, 409)
+                    skip = jev.skip_match(settings, context['transaction'])
+                    if skip is not None:
+                        raise jev.JevError(
+                            "Skipped for AI by the settings pattern %s" % skip, 422)
                     # One explicit request, off the Tornado event loop. No queue,
                     # prefetching, retries or persisted classification results.
                     result = await asyncio.get_running_loop().run_in_executor(
@@ -348,6 +366,27 @@ class AcceptRulesHandler(tornado.web.RequestHandler):
     def post(self):
         self.application.handle_accept_rules()
         self.set_header('Content-Type', 'application/json')
+        self.write(json.dumps(None).encode())
+
+
+class JevBatchHandler(tornado.web.RequestHandler):
+    def post(self, operation):
+        self.set_header('Content-Type', 'application/json')
+        try:
+            if operation == 'stop':
+                self.application.stop_jev_batch()
+            else:
+                try:
+                    msg = json.loads(self.request.body)
+                except ValueError:
+                    msg = None
+                if not isinstance(msg, dict):
+                    raise jev.JevError("Invalid request.", 400)
+                self.application.start_jev_batch(msg.get('mode'), msg.get('n'))
+        except jev.JevError as exc:
+            self.set_status(exc.status)
+            self.write(json.dumps({'error': str(exc)}))
+            return
         self.write(json.dumps(None).encode())
 
 
@@ -515,6 +554,7 @@ class Application(tornado.web.Application):
             (r'/%s/select_candidate' % secret_key, SelectCandidateHandler),
             (r'/%s/skip' % secret_key, SkipHandler),
             (r'/%s/accept_rules' % secret_key, AcceptRulesHandler),
+            (r'/%s/jev_batch(?:_(stop))?' % secret_key, JevBatchHandler),
             (r'/%s/retrain' % secret_key, RetrainHandler),
         ], **kwargs)
         self.socket_clients = set()
@@ -523,6 +563,8 @@ class Application(tornado.web.Application):
         self.current_state_generation = dict()
         self.generation = 0
         self.skip_ids = None
+        self.jev_run = None  # type: Optional[Dict[str, Any]]
+        self.jev_stop_requested = False
 
         self.log_status('Initializing')
 
@@ -574,13 +616,14 @@ class Application(tornado.web.Application):
             invalid=None,
             uncleared=None,
             main_journal_path=os.path.realpath(self.reconciler.journal_path),
-            candidates=None, rules_pending=None, jev_configured=jev.configured(),
-            jev_default_instructions=jev.DEFAULT_INSTRUCTIONS)
+            candidates=None, rules_pending=None, ai_pending=None)
+        # The jev_* settings state is kept during a reload, so the UI does not
+        # flash a misleading "Set OPENROUTER_API_KEY"; it is refreshed on load.
         self.ioloop.add_future(self.reconciler.loaded_future,
                                self._handle_reconciler_loaded)
 
     def retrain(self):
-        if self.reconciler.loaded_future.done():
+        if self.reconciler.loaded_future.done() and not self.jev_running():
             self.reconciler.retrain()
             self.reset()
 
@@ -596,6 +639,11 @@ class Application(tornado.web.Application):
                     list(loaded_reconciler.editor.journal_filenames)))
             self.current_errors = loaded_reconciler.errors
             self.current_invalid = loaded_reconciler.invalid_references
+            settings = loaded_reconciler.jev_settings
+            self.set_state(
+                jev_enabled=jev.configured() and settings is not None,
+                jev_settings_error=loaded_reconciler.jev_settings_error,
+                jev_valid_confidence=settings and settings.valid_confidence)
             self.start_check_modification_observer(loaded_reconciler)
             self.get_next_candidates(new_pending=True)
         except:
@@ -616,7 +664,7 @@ class Application(tornado.web.Application):
 
         self.check_modification_observer.start()
 
-    def get_next_candidates(self, new_pending):
+    def get_next_candidates(self, new_pending, count_pending=True):
         loaded_reconciler = self.reconciler.loaded_future.result()
         start_time = time.time()
         self.next_candidates, index, self.skip_ids = loaded_reconciler.get_next_candidates(
@@ -630,8 +678,13 @@ class Application(tornado.web.Application):
                 pending=(generation, len(loaded_reconciler.pending_data)),
                 uncleared=(generation,
                            len(loaded_reconciler.uncleared_postings)),
-                rules_pending=loaded_reconciler.count_rules_pending(),
             )
+            if count_pending:
+                kwargs.update(
+                    rules_pending=loaded_reconciler.count_rules_pending(),
+                    ai_pending=loaded_reconciler.count_ai_pending()
+                    if self.current_state.get('jev_enabled') else 0,
+                )
 
         accounts = sorted(loaded_reconciler.editor.accounts.keys())
         if accounts != self.current_state['accounts']:
@@ -676,6 +729,10 @@ class Application(tornado.web.Application):
 
     def handle_change_candidate(self, msg):
         from_hints = 'hint_token' in msg
+        if self.jev_running():
+            if from_hints:
+                raise jev.JevError(BATCH_RUNNING, 409)
+            return
         if from_hints:
             get_hint_candidate(self, {**msg, 'token': msg['hint_token']})
         try:
@@ -691,6 +748,8 @@ class Application(tornado.web.Application):
                 raise jev.JevError("Could not apply the change.", 500)
 
     def handle_select_candidate(self, msg):
+        if self.jev_running():
+            return None
         try:
             if (self.next_candidates is not None and msg['generation'] ==
                     self.current_state['candidates_generation']):
@@ -712,7 +771,7 @@ class Application(tornado.web.Application):
             pdb.post_mortem()
 
     def handle_accept_rules(self):
-        if not self.reconciler.loaded_future.done():
+        if not self.reconciler.loaded_future.done() or self.jev_running():
             return
         results = self.reconciler.loaded_future.result().accept_rules_candidates()
         if results:
@@ -722,6 +781,8 @@ class Application(tornado.web.Application):
         self.log_status('Accepted %d transactions categorized by rules' % len(results))
 
     def handle_skip(self, msg):
+        if self.jev_running():
+            return
         pending_generation = int(msg['generation'])
         pending_index = int(msg['index'])
         pending_state = self.current_state['pending']
@@ -739,6 +800,153 @@ class Application(tornado.web.Application):
 
     def handle_retrain(self, _):
         self.retrain()
+
+    def jev_running(self) -> bool:
+        return self.jev_run is not None and self.jev_run['running']
+
+    def start_jev_batch(self, mode, confirmed):
+        """Starts a batch run: `mode` "ai", or "rules_ai" to also accept
+        transactions categorized by rules, in the order of the Pending list.
+
+        `confirmed` is the number of transactions the user agreed to send; the
+        run is refused if more would be sent.
+        """
+        if mode not in ('ai', 'rules_ai'):
+            raise jev.JevError("Invalid batch mode.", 400)
+        if type(confirmed) is not int or confirmed < 0:
+            raise jev.JevError("Invalid request.", 400)
+        if self.jev_running():
+            raise jev.JevError(BATCH_RUNNING, 409)
+        if not self.reconciler.loaded_future.done():
+            raise jev.JevError("The journal is still loading.", 409)
+        if not self.current_state.get('jev_enabled'):
+            raise jev.JevError("JEV is disabled.", 503)
+        loaded_reconciler = self.reconciler.loaded_future.result()
+        ai_pending = loaded_reconciler.get_ai_pending()
+        if len(ai_pending) > confirmed:
+            raise jev.JevError(
+                "%d transactions would be sent to OpenRouter, but %d were confirmed. "
+                "Nothing was sent; check the button and try again." % (
+                    len(ai_pending), confirmed), 409)
+        pending = ai_pending
+        if mode == 'rules_ai':
+            # In the order of the Pending list; rules and AI sets are disjoint.
+            ai_ids = set(map(id, ai_pending))
+            pending = [p for p in loaded_reconciler.pending_data if id(p) in ai_ids or
+                       loaded_reconciler.get_rules_transaction(p) is not None]
+        self.jev_stop_requested = False
+        self.jev_run = dict(mode=mode, i=0, n=len(pending), accepted=0, rules=0, below=0,
+                            errors=0, skipped=0, running=bool(pending))
+        self.set_state(jev_run=self.jev_run)
+        if pending:
+            self.ioloop.spawn_callback(self._run_jev_batch, pending)
+
+    def stop_jev_batch(self):
+        self.jev_stop_requested = True
+
+    def _set_jev_run(self, **changes):
+        # A new dict, so set_state sends the update.
+        self.jev_run = {**self.jev_run, **changes}
+        self.set_state(jev_run=self.jev_run)
+
+    async def _run_jev_batch(self, pending_list):
+        """Classifies `pending_list` one request at a time, accepting confident
+        answers right away; in "rules_ai" mode, accepts entries categorized by
+        rules without a request.
+
+        Everything except the request itself runs on the IOLoop thread, like
+        the other handlers, so the reconciler needs no locking.
+        """
+        loaded_future = self.reconciler.loaded_future
+        loaded_reconciler = loaded_future.result()
+        settings = loaded_reconciler.jev_settings
+        consecutive_errors = 0
+        stopped = None
+        try:
+            for i, pending in enumerate(pending_list):
+                if self.jev_stop_requested:
+                    stopped = 'stopped'
+                    break
+                if self.reconciler.loaded_future is not loaded_future:
+                    stopped = 'the journal was reloaded'
+                    break
+                self._set_jev_run(i=i + 1)
+                # Earlier accepts change the posting database and pending list.
+                if not any(p is pending for p in loaded_reconciler.pending_data):
+                    self._set_jev_run(skipped=self.jev_run['skipped'] + 1)
+                    continue
+                rules_transaction = (self.jev_run['mode'] == 'rules_ai' and
+                                     loaded_reconciler.get_rules_transaction(pending))
+                if rules_transaction:
+                    if loaded_reconciler.editor.check_any_journal_modification():
+                        stopped = 'the journal was modified'
+                        break
+                    accepted = loaded_reconciler.accept_rules_transaction(rules_transaction)
+                    self._notify_modified_files(accepted.modified_filenames)
+                    self._set_jev_run(accepted=self.jev_run['accepted'] + 1,
+                                      rules=self.jev_run['rules'] + 1)
+                    self.get_next_candidates(new_pending=True, count_pending=False)
+                    continue
+                if loaded_reconciler.get_ai_transaction(pending) is None:
+                    self._set_jev_run(skipped=self.jev_run['skipped'] + 1)
+                    continue
+                transaction = pending.entries[0]
+                candidate = loaded_reconciler.make_ai_candidate(transaction)
+                try:
+                    context = history_hints.build_context(
+                        loaded_reconciler.editor, candidate,
+                        training.get_unknown_account_group_numbers(transaction)[0],
+                        settings.is_category)
+                    # Checked on the text actually sent, like single Classify.
+                    if jev.skip_match(settings, context['transaction']):
+                        self._set_jev_run(skipped=self.jev_run['skipped'] + 1)
+                        continue
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        None, functools.partial(
+                            jev.classify, context, instructions=settings.instructions))
+                    if matching.is_unknown_account(result['category']):
+                        raise jev.JevError("JEV suggested an unknown account.")
+                except jev.JevError as exc:
+                    if exc.fatal:
+                        stopped = str(exc)
+                        break
+                    consecutive_errors += 1
+                    self._set_jev_run(errors=self.jev_run['errors'] + 1)
+                    if consecutive_errors >= 3:
+                        stopped = '3 errors in a row, last: %s' % exc
+                        break
+                    continue
+                consecutive_errors = 0
+                if self.reconciler.loaded_future is not loaded_future:
+                    stopped = 'the journal was reloaded'
+                    break
+                if result['confidence'] < settings.valid_confidence:
+                    self._set_jev_run(below=self.jev_run['below'] + 1)
+                    continue
+                if loaded_reconciler.editor.check_any_journal_modification():
+                    stopped = 'the journal was modified'
+                    break
+                accepted = loaded_reconciler.accept_ai_candidate(
+                    transaction, result['category'], result['confidence'])
+                self._notify_modified_files(accepted.modified_filenames)
+                self._set_jev_run(accepted=self.jev_run['accepted'] + 1)
+                # Counts are refreshed once at the end.
+                self.get_next_candidates(new_pending=True, count_pending=False)
+        except Exception:
+            traceback.print_exc()
+            stopped = 'internal error, see the server log'
+        finally:
+            run = self.jev_run
+            self._set_jev_run(running=False)
+            message = 'JEV: accepted %d of %d%s, %d below threshold, %d errors, %d skipped' % (
+                run['accepted'], run['n'],
+                ' (%d by rules)' % run['rules'] if run['mode'] == 'rules_ai' else '',
+                run['below'], run['errors'], run['skipped'])
+            self.log_status(message + (', stopped: %s' % stopped if stopped else ''))
+            if stopped == 'the journal was modified':
+                self.check_modification()
+            elif self.reconciler.loaded_future is loaded_future:
+                self.get_next_candidates(new_pending=True)
 
 
 def parse_arguments(argv, **kwargs):
@@ -820,6 +1028,12 @@ def parse_arguments(argv, **kwargs):
         type=str,
         help=
         'YAML file with rules applied to imported transactions.  Requires fava.'
+    )
+    argparser.add_argument(
+        '--settings',
+        type=str,
+        help=
+        'YAML file with JEV settings (the "jev" key); without it, built-in defaults are used.'
     )
     argparser.add_argument(
         '--classifier_cache',

@@ -1,0 +1,8 @@
+# JEV settings for the demo (all values are the defaults); see FORK.md.
+jev:
+  account_filters:
+    include: ['^(Expenses|Income):', '^(Assets|Liabilities):']
+    exclude: ['^Expenses:Unknown$', '^Income:Unknown$', '^Expenses:FIXME$', ':Unattributed']
+  skip_transactions: []
+  valid_confidence: 90
+  prompt: null
