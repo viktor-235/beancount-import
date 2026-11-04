@@ -14,3 +14,5 @@ htmlcov/
 .env
 .env.*
 !.env.example
+TODO.md
+PLAN.md
