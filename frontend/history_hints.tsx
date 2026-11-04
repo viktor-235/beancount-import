@@ -10,7 +10,12 @@ import { isJevAnswerValid, percent } from "./jev_batch";
 interface HistoryRow {
   account: string;
   count: number;
-  narrations: { narration: string; count: number }[];
+  narrations: {
+    narration: string;
+    count: number;
+    amounts: { amount: string; count: number }[];
+    more_amounts: number;
+  }[];
 }
 interface Classification {
   category: string;
@@ -433,7 +438,16 @@ export class HistoryHintsComponent extends React.Component<Props, State> {
                           <button
                             className="hints-narration"
                             key={n.narration}
-                            title="Use this narration for the current candidate; Confirm saves the transaction"
+                            title={n.amounts
+                              .map((a) => `${a.amount} ×${a.count}`)
+                              .concat(
+                                n.more_amounts
+                                  ? [`+${n.more_amounts} more amounts`]
+                                  : [],
+                                "",
+                                "Use this narration for the current candidate; Confirm saves the transaction"
+                              )
+                              .join("\n")}
                             onClick={() => this.applyNarration(n.narration)}
                           >
                             <span>{n.narration}</span>

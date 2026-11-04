@@ -80,6 +80,7 @@ def summarize(entries, query):
     needle = normalize(query)
     counts = Counter()
     narrations = defaultdict(Counter)
+    amounts = defaultdict(Counter)
     matches = 0
     for txn in entries:
         if not isinstance(txn, data.Transaction):
@@ -94,11 +95,20 @@ def summarize(entries, query):
                 counts[account] += 1
                 if txn.narration:
                     narrations[account][txn.narration] += 1
+                    if posting.units is not None and posting.units.number is not None:
+                        amounts[account, txn.narration][posting.units] += 1
     return {"transaction_count": matches, "accounts": [
         {"account": account, "count": count, "narrations": [
-            {"narration": narration, "count": n}
+            {"narration": narration, "count": n, **_amounts(amounts[account, narration])}
             for narration, n in narrations[account].most_common(8)]}
         for account, count in counts.most_common()]}
+
+
+def _amounts(counter, limit=5):
+    """Distinct amounts, most frequent then largest first, and how many more."""
+    ranked = sorted(counter.items(), key=lambda c: (-c[1], -abs(c[0].number), c[0].currency))
+    return {"amounts": [{"amount": str(units), "count": n} for units, n in ranked[:limit]],
+            "more_amounts": max(len(ranked) - limit, 0)}
 
 
 def build_context(editor, candidate, group_number, is_category=None):

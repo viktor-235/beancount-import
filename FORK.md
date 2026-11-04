@@ -32,6 +32,8 @@ Full diff against upstream:
 
 - The panel appears under the candidates. It shows how often the selected payee
   was booked to each account, plus the most frequent narrations per account.
+  Hover a narration to see its distinct amounts with counts, most frequent
+  first, then largest; past 5, only the number of the rest.
 - Search starts with the payee. It matches substrings in payee, narration and
   metadata, ignoring case and punctuation. Clear the search box to search the
   whole ledger.

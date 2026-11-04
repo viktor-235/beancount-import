@@ -87,6 +87,22 @@ def test_history_search_and_exact_payee_context(loaded):
     assert not any(a.startswith("Income:") for a in ctx["categories"])
 
 
+def test_history_narration_amounts():
+    ledger = "2000-01-01 open Assets:Bank\n2000-01-01 open Expenses:Cloud\n"
+    for day, amount in enumerate([1, 1, 1, 2, -7, -7, 4, 4, 5, 6, 8], start=1):
+        ledger += (f'2025-01-{day:02d} * "Shop" "Plan"\n'
+                   f"  Expenses:Cloud {amount} USD\n  Assets:Bank\n")
+    entries, errors, _ = loader.load_string(ledger)
+    assert not errors
+    narration = hints.summarize(entries, "shop")["accounts"][0]["narrations"][0]
+    # Most frequent first, then largest magnitude; the rest are only counted.
+    assert narration["amounts"] == [
+        {"amount": "1 USD", "count": 3}, {"amount": "-7 USD", "count": 2},
+        {"amount": "4 USD", "count": 2}, {"amount": "8 USD", "count": 1},
+        {"amount": "6 USD", "count": 1}]
+    assert narration["more_amounts"] == 2
+
+
 def test_exclusion_uses_origin_not_identity(loaded):
     candidate = candidates_for(loaded, "Single purchase").candidates[-1]
     excluded = {hints.origin(e) for e in candidate.used_transactions}
