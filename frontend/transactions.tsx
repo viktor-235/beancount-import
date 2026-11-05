@@ -25,11 +25,13 @@ import {
   datePreset,
   datePresets,
   DatePreset,
-  filterQuery,
   restoreFilter,
   storedFilter,
-  TransactionsFilter
+  TransactionsFilter,
+  transactionsRequest
 } from "./transactions_filter";
+
+const narrationCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
 const retryDelay = 1000;
 const searchDelay = 300;
@@ -41,12 +43,8 @@ function fetchPage(
   limit: number
 ): Promise<TransactionsPage> {
   return fetchJson(
-    `${window.location.pathname}${secretKey}/transactions?${filterQuery(
-      filter,
-      journalGeneration,
-      offset,
-      limit
-    )}`
+    `${window.location.pathname}${secretKey}/transactions`,
+    transactionsRequest(filter, journalGeneration, offset, limit)
   );
 }
 
@@ -78,6 +76,8 @@ export class TransactionsListState
   metadata?: ServerListMetadata;
   emitter = new EventEmitter();
   categorizers: string[] = [];
+  // Narrations of the list without narration exclusions, alphabetically.
+  narrations: [string, number][] = [];
   error?: string;
 
   private active = false;
@@ -225,6 +225,10 @@ export class TransactionsListState
           listGeneration: this.listGeneration
         };
         this.categorizers = page.categorizers;
+        const counts = page.narrations || {};
+        this.narrations = Object.keys(counts)
+          .sort(narrationCollator.compare)
+          .map(narration => [narration, counts[narration]]);
         this.error = undefined;
         this.metadata = [this.listGeneration, page.count];
         this.emitter.emit("change", this.metadata);
@@ -360,6 +364,58 @@ export class TransactionsComponent extends React.PureComponent<
     this.setFilter({ categorizer: value === allCategorizers ? null : value });
   };
 
+  private setNarrationsChecked(narrations: string[], checked: boolean) {
+    const excluded = new Set(this.props.listState.filter.excludedNarrations);
+    narrations.forEach(n => (checked ? excluded.delete(n) : excluded.add(n)));
+    this.setFilter({ excludedNarrations: [...excluded] });
+  }
+
+  private renderNarrations() {
+    const { filter, narrations } = this.props.listState;
+    const excluded = new Set(filter.excludedNarrations);
+    const all = narrations.map(([narration]) => narration);
+    const unchecked = all.filter(n => excluded.has(n)).length;
+    return (
+      <div className="action-button__group">
+        <button
+          className="action-button transactions-narrations-button"
+          popovertarget="transactions-narrations"
+          title="Narrations of the list; unchecked ones are left out"
+        >
+          narration: {unchecked ? `${all.length - unchecked} of ${all.length}` : "All"}
+        </button>
+        <div id="transactions-narrations" popover="auto">
+          <div className="transactions-narrations-actions">
+            <button
+              className="action-button"
+              onClick={() => this.setFilter({ excludedNarrations: [] })}
+            >
+              Check all
+            </button>
+            <button
+              className="action-button"
+              onClick={() => this.setNarrationsChecked(all, false)}
+            >
+              Uncheck all
+            </button>
+          </div>
+          {narrations.map(([narration, count]) => (
+            <label key={narration}>
+              <input
+                type="checkbox"
+                checked={!excluded.has(narration)}
+                onChange={event =>
+                  this.setNarrationsChecked([narration], event.target.checked)
+                }
+              />
+              {narration || "(empty)"} ({count})
+            </label>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   private renderItem(
     item: TransactionItem,
     index: number,
@@ -445,6 +501,7 @@ export class TransactionsComponent extends React.PureComponent<
               ))}
             </select>
           </div>
+          {this.renderNarrations()}
           <div className="action-button__group">
             <input
               type="search"

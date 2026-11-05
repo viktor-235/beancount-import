@@ -1,7 +1,8 @@
 """Journal transactions for the Transactions tab: filtering and encoding."""
 
+import collections
 import datetime
-from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, NamedTuple, Optional
 
 from beancount.core import data
 
@@ -19,24 +20,33 @@ class Filter(NamedTuple):
     categorizer: Optional[str]
     # Normalized with `history_hints.normalize`.
     search: str
+    # Transactions with these narrations are left out.
+    exclude_narrations: FrozenSet[str] = frozenset()
 
 
 def _parse_date(value: str) -> Optional[datetime.date]:
     return datetime.date.fromisoformat(value) if value else None
 
 
-def parse_filter(args: Mapping[str, str]) -> Filter:
-    """Builds a filter from query arguments; raises ValueError on bad input.
+def parse_filter(args: Mapping[str, Any]) -> Filter:
+    """Builds a filter from request arguments; raises ValueError on bad input.
 
     Dates are YYYY-MM-DD or empty (open bound). An absent `categorizer`
-    means all transactions, an empty one means none.
+    means all transactions, an empty one means none. `exclude_narrations`
+    is a list of strings, all other arguments are strings.
     """
-    if not isinstance(args, Mapping) or not all(isinstance(v, str) for v in args.values()):
-        raise ValueError('expected an object of strings')
+    if not isinstance(args, Mapping):
+        raise ValueError('expected an object')
+    exclude = args.get('exclude_narrations', [])
+    if not isinstance(exclude, list) or not all(isinstance(v, str) for v in exclude):
+        raise ValueError('exclude_narrations is not an array of strings')
+    if not all(isinstance(v, str) for k, v in args.items() if k != 'exclude_narrations'):
+        raise ValueError('expected string arguments')
     result = Filter(start=_parse_date(args.get('start', '')),
                     end=_parse_date(args.get('end', '')),
                     categorizer=args.get('categorizer'),
-                    search=history_hints.normalize(args.get('search', '')))
+                    search=history_hints.normalize(args.get('search', '')),
+                    exclude_narrations=frozenset(exclude))
     if result.start and result.end and result.start > result.end:
         raise ValueError('start is after end')
     return result
@@ -92,8 +102,16 @@ class Index:
                     continue
             if flt.search and flt.search not in self._search_text(index):
                 continue
+            if txn.narration in flt.exclude_narrations:
+                continue
             result.append(txn)
         return result
+
+    def narration_counts(self, flt: Filter) -> Dict[str, int]:
+        """Narrations of the transactions matching `flt` apart from its
+        narration exclusions, with their counts."""
+        return collections.Counter(
+            txn.narration for txn in self.filter(flt._replace(exclude_narrations=frozenset())))
 
 
 def encode_item(txn: data.Transaction) -> Dict[str, Any]:

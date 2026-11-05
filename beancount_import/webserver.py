@@ -276,18 +276,22 @@ class TransactionsHandler(tornado.web.RequestHandler):
     """A filtered page of journal transactions for the Transactions tab.
 
     The client asks only while the tab is open, so nothing is computed on
-    state updates. `limit=0` returns only the count and categorizers.
+    state updates. `limit=0` returns only the count, categorizers and
+    narration counts.
     """
 
-    def get(self):
+    # POST: the excluded narrations may not fit in a URL.
+    def post(self):
         self.set_header('Content-Type', 'application/json')
         self.set_header('Cache-Control', 'no-store')
-        args = {name: self.get_query_argument(name)
-                for name in self.request.query_arguments}
         try:
-            generation = int(args.pop('generation', ''))
-            offset = int(args.pop('offset', '0'))
-            limit = min(int(args.pop('limit', '0')), MAX_TRANSACTIONS_LIMIT)
+            args = json.loads(self.request.body)
+            if not isinstance(args, dict):
+                raise ValueError('expected an object')
+            generation, offset, limit = (args.pop(name, None) for name in ('generation', 'offset', 'limit'))
+            if not all(type(v) is int for v in (generation, offset, limit)):
+                raise ValueError('generation, offset and limit must be integers')
+            limit = min(limit, MAX_TRANSACTIONS_LIMIT)
             flt = transactions.parse_filter(args)
             if offset < 0 or limit < 0:
                 raise ValueError('negative offset or limit')
@@ -299,12 +303,15 @@ class TransactionsHandler(tornado.web.RequestHandler):
             self.set_status(404)
             return self.finish(json.dumps({'error': 'Stale generation.'}))
         index, matched = result
-        self.write(json.dumps({
+        page = {
             'count': len(matched),
             'categorizers': index.categorizers,
             'items': [transactions.encode_item(txn)
                       for txn in matched[offset:offset + limit]],
-        }))
+        }
+        if limit == 0:
+            page['narrations'] = index.narration_counts(flt)
+        self.write(json.dumps(page))
 
 
 BATCH_RUNNING = "An AI batch run is in progress."

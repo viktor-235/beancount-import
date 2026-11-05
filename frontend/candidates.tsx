@@ -13,7 +13,7 @@ import {
   JevRun,
   ReviewState
 } from "./server_connection";
-import { ReviewMove, reviewMoves } from "./transactions_filter";
+import { FilterArgs, ReviewMove, reviewMoves } from "./transactions_filter";
 import {
   JevBatchMode,
   JevBatchStatus,
@@ -103,7 +103,7 @@ interface CandidatesComponentProps {
   // Set while a journal transaction from the Transactions tab is edited.
   review?: ReviewState | null;
   reviewLabel?: string;
-  reviewFilter: () => Record<string, string>;
+  reviewFilter: () => FilterArgs;
   onReviewMove: (move: ReviewMove) => void;
   onReviewClose: () => void;
 }

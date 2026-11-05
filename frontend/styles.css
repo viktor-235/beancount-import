@@ -215,13 +215,22 @@ a {
 /* Transactions tab toolbar: inline filters, wrapping on narrow panels. */
 .transactions-toolbar { flex-wrap: wrap; justify-content: flex-start; align-items: center; column-gap: 8px; }
 .transactions-toolbar .action-button__group { margin: 6px 0; display: inline-flex; align-items: stretch; }
-.transactions-toolbar input, .transactions-toolbar select { box-sizing: border-box; padding: 6px 4px; font: inherit; line-height: 1.2; background: var(--color-main-bg); color: var(--color-main-text); border: 1px solid var(--color-main-accent); border-radius: 5px; }
+.transactions-toolbar input:not([type="checkbox"]), .transactions-toolbar select { box-sizing: border-box; padding: 6px 4px; font: inherit; line-height: 1.2; background: var(--color-main-bg); color: var(--color-main-text); border: 1px solid var(--color-main-accent); border-radius: 5px; }
 .transactions-toolbar input[type="search"] { width: 160px; }
 .action-button.action-button--active { background-color: var(--color-select-bg); color: var(--color-select-text); }
 .transactions-count { margin-left: auto !important; white-space: nowrap; }
 /* Transactions toolbar: every control as high as a button; the date fields
    are glued, with rounded outer corners only. */
-.transactions-toolbar .action-button, .transactions-toolbar input, .transactions-toolbar select { box-sizing: border-box; height: 33px; margin: 0; }
+.transactions-toolbar .action-button, .transactions-toolbar input:not([type="checkbox"]), .transactions-toolbar select { box-sizing: border-box; height: 33px; margin: 0; }
 .transactions-dates input:first-child { border-radius: 5px 0 0 5px; border-right: none; }
 .transactions-dates input:last-child { border-radius: 0 5px 5px 0; }
+/* Narration filter: a native popover anchored below its button. */
+/* Up/down chevrons as on the native select next to it. */
+.transactions-narrations-button { anchor-name: --transactions-narrations; font: inherit; }
+.transactions-narrations-button::after { content: ""; display: inline-block; width: 10px; height: 14px; margin-left: 8px; vertical-align: middle; background-color: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='14' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 5l3-3 3 3M2 9l3 3 3-3'/%3E%3C/svg%3E") no-repeat center; }
+#transactions-narrations { position-anchor: --transactions-narrations; inset: auto; top: anchor(bottom); left: anchor(left); margin: 4px 0 0; max-height: 60vh; max-width: 480px; overflow: auto; padding: 4px 0; background: var(--color-main-bg); color: var(--color-main-text); border: 1px solid var(--color-main-accent); border-radius: 5px; }
+#transactions-narrations label { display: flex; gap: 6px; align-items: center; padding: 2px 8px; overflow-wrap: anywhere; cursor: pointer; }
+#transactions-narrations input { flex: none; margin: 0; }
+#transactions-narrations label:hover { background: var(--color-hover-bg); color: var(--color-hover-text); }
+.transactions-narrations-actions { display: flex; padding: 4px 8px; }
 .review-banner { padding: 6px 10px; border-bottom: 1px solid var(--color-main-accent); background-color: var(--color-select-bg); color: var(--color-select-text); }

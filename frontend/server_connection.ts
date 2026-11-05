@@ -1,4 +1,6 @@
 import { EventEmitter } from "fbemitter";
+import type { FilterArgs } from "./transactions_filter";
+
 export type JournalError = [
   string,
   string,
@@ -177,6 +179,9 @@ export interface TransactionsPage {
   count: number;
   categorizers: string[];
   items: TransactionItem[];
+  // Narration counts of the list without narration exclusions; only in
+  // count requests (limit=0).
+  narrations?: Record<string, number>;
 }
 
 /** The journal transaction open in Candidates for editing. */
@@ -254,7 +259,7 @@ interface SelectCandidateMessage {
     ignore?: boolean;
     // Transactions filter arguments while editing a journal transaction:
     // the server opens the next row after Confirm.
-    review_filter?: Record<string, string>;
+    review_filter?: FilterArgs;
   };
 }
 
@@ -322,8 +327,14 @@ export class FetchError extends Error {
   }
 }
 
-export function fetchJson(url: string): Promise<any> {
-  return fetch(url).then(response => {
+/** GET `url`, or POST `body` as JSON if given. */
+export function fetchJson(url: string, body?: object): Promise<any> {
+  const init: RequestInit | undefined = body && {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  };
+  return fetch(url, init).then(response => {
     if (response.ok) {
       return response.json();
     }

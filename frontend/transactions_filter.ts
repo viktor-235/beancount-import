@@ -8,6 +8,8 @@ export interface TransactionsFilter {
   // null = all transactions, "" = no posting has a categorizer.
   categorizer: string | null;
   search: string;
+  // Transactions with these narrations are left out.
+  excludedNarrations: string[];
 }
 
 export type DatePreset =
@@ -65,7 +67,8 @@ export function defaultFilter(today: Date): TransactionsFilter {
   return {
     ...datePreset("sinceLastMonth", today),
     categorizer: null,
-    search: ""
+    search: "",
+    excludedNarrations: []
   };
 }
 
@@ -112,35 +115,44 @@ export function restoreFilter(value: unknown, today: Date): TransactionsFilter {
   const dates = datePresets.some(([name]) => name === v.preset)
     ? datePreset(v.preset!, today)
     : { start: v.start, end: v.end };
-  return { ...dates, categorizer: v.categorizer, search: v.search };
+  // Absent in filters stored before narrations could be excluded.
+  const excluded = v.excludedNarrations;
+  const excludedNarrations =
+    Array.isArray(excluded) && excluded.every(isString) ? excluded : [];
+  return {
+    ...dates,
+    categorizer: v.categorizer,
+    search: v.search,
+    excludedNarrations
+  };
 }
 
+export type FilterArgs = Record<string, string | string[]>;
+
 /** Filter arguments as the server parses them; categorizer is omitted for All. */
-export function filterArgs(filter: TransactionsFilter): Record<string, string> {
-  const args: Record<string, string> = {
+export function filterArgs(filter: TransactionsFilter): FilterArgs {
+  const args: FilterArgs = {
     start: filter.start,
     end: filter.end,
     search: filter.search
   };
+  if (filter.excludedNarrations.length) {
+    args.exclude_narrations = filter.excludedNarrations;
+  }
   if (filter.categorizer !== null) {
     args.categorizer = filter.categorizer;
   }
   return args;
 }
 
-/** Query string of GET /transactions. */
-export function filterQuery(
+/** Body of POST /transactions. */
+export function transactionsRequest(
   filter: TransactionsFilter,
   generation: number,
   offset: number,
   limit: number
-): string {
-  return new URLSearchParams({
-    generation: String(generation),
-    ...filterArgs(filter),
-    offset: String(offset),
-    limit: String(limit)
-  }).toString();
+) {
+  return { generation, ...filterArgs(filter), offset, limit };
 }
 
 export type ReviewMove = "first" | "previous" | "next" | "last";

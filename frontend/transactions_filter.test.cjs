@@ -16,11 +16,11 @@ const {
   datePreset,
   defaultFilter,
   filterArgs,
-  filterQuery,
   localIsoDate,
   restoreFilter,
   reviewMoves,
-  storedFilter
+  storedFilter,
+  transactionsRequest
 } = mod.exports;
 
 const day = (y, m, d) => new Date(y, m - 1, d, 23, 30);
@@ -55,7 +55,7 @@ test("default filter and active preset", () => {
   const today = day(2026, 11, 3);
   const filter = defaultFilter(today);
   assert.deepEqual(filter, {
-    start: "2026-10-01", end: "2026-11-03", categorizer: null, search: "",
+    start: "2026-10-01", end: "2026-11-03", categorizer: null, search: "", excludedNarrations: [],
   });
   assert.equal(activePreset(filter, today), "sinceLastMonth");
   assert.equal(activePreset({ ...filter, start: "", end: "" }, today), "all");
@@ -63,24 +63,20 @@ test("default filter and active preset", () => {
   assert.equal(activePreset({ ...filter, ...datePreset("lastMonth", today) }, today), "lastMonth");
 });
 
-test("query encodes All, (none) and a value", () => {
-  const filter = { start: "2026-10-01", end: "", categorizer: null, search: "Café & co" };
-  const all = new URLSearchParams(filterQuery(filter, 7, 10, 20));
-  assert.equal(all.has("categorizer"), false);
-  assert.equal(all.get("generation"), "7");
-  assert.equal(all.get("start"), "2026-10-01");
-  assert.equal(all.get("end"), "");
-  assert.equal(all.get("search"), "Café & co");
-  assert.equal(all.get("offset"), "10");
-  assert.equal(all.get("limit"), "20");
-  const none = new URLSearchParams(filterQuery({ ...filter, categorizer: "" }, 7, 0, 0));
-  assert.equal(none.get("categorizer"), "");
-  const jev = new URLSearchParams(filterQuery({ ...filter, categorizer: "jev" }, 7, 0, 0));
-  assert.equal(jev.get("categorizer"), "jev");
+test("request encodes All, (none), a value and excluded narrations", () => {
+  const filter = { start: "2026-10-01", end: "", categorizer: null, search: "Café & co", excludedNarrations: [] };
+  assert.deepEqual(transactionsRequest(filter, 7, 10, 20), {
+    generation: 7, start: "2026-10-01", end: "", search: "Café & co", offset: 10, limit: 20,
+  });
+  assert.equal(transactionsRequest({ ...filter, categorizer: "" }, 7, 0, 0).categorizer, "");
+  assert.equal(transactionsRequest({ ...filter, categorizer: "jev" }, 7, 0, 0).categorizer, "jev");
+  assert.deepEqual(
+    transactionsRequest({ ...filter, excludedNarrations: ["Rent", "Кофе"] }, 7, 0, 0).exclude_narrations,
+    ["Rent", "Кофе"]);
 });
 
 test("filter arguments for review requests", () => {
-  const filter = { start: "2026-10-01", end: "", categorizer: null, search: "x" };
+  const filter = { start: "2026-10-01", end: "", categorizer: null, search: "x", excludedNarrations: [] };
   assert.deepEqual(filterArgs(filter), { start: "2026-10-01", end: "", search: "x" });
   assert.equal(filterArgs({ ...filter, categorizer: "" }).categorizer, "");
 });
@@ -100,12 +96,16 @@ test("stored filter keeps presets by name and custom dates as is", () => {
   const december = day(2026, 12, 5);
   const roundTrip = (filter) =>
     restoreFilter(JSON.parse(JSON.stringify(storedFilter(filter, november))), december);
-  const thisMonth = { ...datePreset("thisMonth", november), categorizer: "jev", search: "shop" };
+  const thisMonth = { ...datePreset("thisMonth", november), categorizer: "jev", search: "shop", excludedNarrations: ["Rent"] };
   assert.deepEqual(roundTrip(thisMonth), {
-    start: "2026-12-01", end: "2026-12-05", categorizer: "jev", search: "shop",
+    start: "2026-12-01", end: "2026-12-05", categorizer: "jev", search: "shop", excludedNarrations: ["Rent"],
   });
-  const custom = { start: "2026-03-02", end: "2026-04-01", categorizer: "", search: "" };
+  const custom = { start: "2026-03-02", end: "2026-04-01", categorizer: "", search: "", excludedNarrations: [] };
   assert.deepEqual(roundTrip(custom), custom);
+  // Stored before narrations could be excluded, or broken.
+  for (const excludedNarrations of [undefined, "Rent", [1]]) {
+    assert.deepEqual(restoreFilter({ ...custom, excludedNarrations }, december), custom);
+  }
 });
 
 test("invalid stored filter falls back to the default", () => {
