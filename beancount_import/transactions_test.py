@@ -3,7 +3,6 @@ import datetime
 import json
 import os
 import tempfile
-import urllib.parse
 from unittest.mock import patch
 
 import pytest
@@ -91,13 +90,26 @@ def test_search(index, search, expected):
     assert narrations(index, search=search) == expected
 
 
+def test_exclude_narrations(index):
+    assert narrations(index, exclude_narrations=['Bread', 'Flat white']) == [
+        'Weekly shop', 'February rent']
+    assert narrations(index, exclude_narrations=['bread']) == narrations(index)  # exact match
+    assert narrations(index, exclude_narrations=[]) == narrations(index)
+
+
+def test_narration_counts(index):
+    flt = transactions.parse_filter({'start': '2026-02-01', 'exclude_narrations': ['Bread']})
+    assert index.narration_counts(flt) == {'Bread': 1, 'Weekly shop': 1, 'February rent': 1}
+
+
 def test_combined_filters(index):
     assert narrations(index, start='2026-02-01', categorizer='rules', search='market') == [
         'Weekly shop']
 
 
 @pytest.mark.parametrize('args', [
-    {'start': '2026-13-01'}, {'end': 'yesterday'}, {'start': '2026-02-02', 'end': '2026-02-01'}])
+    {'start': '2026-13-01'}, {'end': 'yesterday'}, {'start': '2026-02-02', 'end': '2026-02-01'},
+    {'exclude_narrations': 'Bread'}, {'exclude_narrations': ['Bread', 1]}, {'search': 1}])
 def test_parse_filter_errors(args):
     with pytest.raises(ValueError):
         transactions.parse_filter(args)
@@ -141,11 +153,11 @@ class TransactionsHTTPTest(tornado.testing.AsyncHTTPTestCase):
             await asyncio.sleep(.01)
         raise AssertionError('timeout')
 
-    async def get(self, **args):
-        query = urllib.parse.urlencode(args)
+    async def query(self, **args):
+        args = {'offset': 0, 'limit': 0, **args}
         response = await self.http_client.fetch(
-            self.get_url('/%s/transactions?%s' % (self.app.secret_key, query)),
-            raise_error=False)
+            self.get_url('/%s/transactions' % self.app.secret_key),
+            method='POST', body=json.dumps(args), raise_error=False)
         return response.code, json.loads(response.body)
 
     @tornado.testing.gen_test
@@ -154,19 +166,28 @@ class TransactionsHTTPTest(tornado.testing.AsyncHTTPTestCase):
         # Nothing is computed until the tab asks.
         assert self.app.transactions_cache is None
 
-        code, body = await self.get(generation=generation, limit=0)
+        code, body = await self.query(generation=generation, limit=0)
         assert code == 200
         # The ignored journal is not listed.
-        assert body == {'count': 6, 'categorizers': [], 'items': []}
-        code, body = await self.get(generation=generation, search='ignored', limit=5)
+        assert body == {'count': 6, 'categorizers': [], 'items': [], 'narrations': {
+            'Groceries': 1, **{'Pending %d' % day: 1 for day in range(1, 6)}}}
+        # Narration counts ignore the exclusions and follow the other filters.
+        code, body = await self.query(generation=generation, start='2020-02-01',
+                                      exclude_narrations=['Pending 1', 'Pending 2'])
+        assert body['count'] == 3
+        assert sorted(body['narrations']) == ['Pending %d' % day for day in range(1, 6)]
+        code, body = await self.query(generation=generation, limit=1,
+                                      exclude_narrations=['Pending 5'])
+        assert 'Pending 4' in body['items'][0]['formatted']
+        code, body = await self.query(generation=generation, search='ignored', limit=5)
         assert body['count'] == 0
         # `limit` is capped.
-        code, body = await self.get(generation=generation, limit=1000000)
+        code, body = await self.query(generation=generation, limit=1000000)
         assert code == 200 and len(body['items']) == 6
         with patch.object(transactions, 'encode_item', return_value={}) as enc:
-            await self.get(generation=generation, limit=1000000)
+            await self.query(generation=generation, limit=1000000)
             assert enc.call_count <= webserver.MAX_TRANSACTIONS_LIMIT
-        code, body = await self.get(generation=generation, start='2020-02-01',
+        code, body = await self.query(generation=generation, start='2020-02-01',
                                     offset=1, limit=2)
         assert body['count'] == 5
         assert [i['date'] for i in body['items']] == ['2020-02-04', '2020-02-03']
@@ -177,15 +198,16 @@ class TransactionsHTTPTest(tornado.testing.AsyncHTTPTestCase):
         index = self.app.transactions_cache[1]
         with patch.object(transactions.Index, 'filter',
                           side_effect=AssertionError('recomputed')):
-            assert (await self.get(generation=generation, start='2020-02-01',
+            assert (await self.query(generation=generation, start='2020-02-01',
                                    limit=1))[0] == 200
         assert self.app.transactions_cache[1] is index
 
-        assert (await self.get(generation=generation + 1))[0] == 404
+        assert (await self.query(generation=generation + 1))[0] == 404
         for bad in ({'start': 'x'}, {'offset': -1}, {'limit': 'a'},
-                    {'start': '2020-02-02', 'end': '2020-02-01'}):
-            assert (await self.get(generation=generation, **bad))[0] == 400
-        assert (await self.get())[0] == 400
+                    {'start': '2020-02-02', 'end': '2020-02-01'},
+                    {'exclude_narrations': 'Pending 1'}):
+            assert (await self.query(generation=generation, **bad))[0] == 400
+        assert (await self.query())[0] == 400
 
         # An accepted transaction bumps the generation and shows up.
         loaded = self.app.reconciler.loaded_future.result()
@@ -193,17 +215,17 @@ class TransactionsHTTPTest(tornado.testing.AsyncHTTPTestCase):
         loaded.accept_ai_candidate(pending.entries[0], 'Expenses:Coffee', .95)
         self.app.get_next_candidates(new_pending=True)
         new_generation = await self.generation(generation)
-        assert (await self.get(generation=generation))[0] == 404
-        code, body = await self.get(generation=new_generation, categorizer='jev', limit=10)
+        assert (await self.query(generation=generation))[0] == 404
+        code, body = await self.query(generation=new_generation, categorizer='jev', limit=10)
         assert body['count'] == 1 and body['categorizers'] == ['jev']
         assert 'Pending 1' in body['items'][0]['formatted']
-        code, body = await self.get(generation=new_generation, categorizer='', limit=0)
+        code, body = await self.query(generation=new_generation, categorizer='', limit=0)
         assert body['count'] == 5
 
     @tornado.testing.gen_test
     async def test_reload_resets_generation(self):
         generation = await self.generation()
-        assert (await self.get(generation=generation, limit=0))[1]['count'] == 6
+        assert (await self.query(generation=generation, limit=0))[1]['count'] == 6
         with open(self.journal, 'a') as f:
             f.write('\n2020-03-01 * "New" "Outside edit"\n'
                     '  Assets:Bank -1 USD\n  Expenses:Coffee 1 USD\n')
@@ -211,6 +233,6 @@ class TransactionsHTTPTest(tornado.testing.AsyncHTTPTestCase):
         assert self.app.current_state['journal_generation'] is None
         assert self.app.transactions_cache is None
         new_generation = await self.generation()
-        code, body = await self.get(generation=new_generation, search='outside', limit=5)
+        code, body = await self.query(generation=new_generation, search='outside', limit=5)
         assert body['count'] == 1
         assert body['items'][0]['date'] == datetime.date(2020, 3, 1).isoformat()
